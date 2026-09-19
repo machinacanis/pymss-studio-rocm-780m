@@ -705,7 +705,7 @@ function formatDurationMs(value: number | undefined) {
           </n-button>
         </div>
 
-        <n-collapse-transition :show="isExpanded(item.id)">
+        <n-collapse-transition class="result-row__collapse" :show="isExpanded(item.id)">
           <div class="result-row__details">
             <section
               v-for="result in item.items"
@@ -950,8 +950,12 @@ function formatDurationMs(value: number | undefined) {
   justify-content: flex-end;
 }
 
-.result-row__details {
+.result-row__collapse {
   grid-column: 1 / -1;
+  min-width: 0;
+}
+
+.result-row__details {
   display: grid;
   gap: 10px;
   padding: 12px 0 2px 54px;
@@ -1082,6 +1086,10 @@ function formatDurationMs(value: number | undefined) {
 
   .result-row {
     grid-template-columns: 1fr;
+  }
+
+  .result-row--selectable {
+    grid-template-columns: auto minmax(0, 1fr);
   }
 
   .result-row__actions {

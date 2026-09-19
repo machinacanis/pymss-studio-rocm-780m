@@ -15,6 +15,9 @@ from functools import partial, wraps
 from pathlib import Path
 from typing import Any, Callable
 
+from pip._vendor.packaging.requirements import Requirement
+from pip._vendor.packaging.version import Version
+
 from worker_runtime_lock import RuntimeLockBusy, runtime_lock
 
 MANIFEST_PATH = Path(__file__).with_name("runtime-manifest.json")
@@ -1124,12 +1127,6 @@ def _manifest_versions_are_satisfied(
     requirement parser as pip when it is available in the runtime, and report missing or
     incompatible distributions to the caller before state is committed.
     """
-    try:
-        from packaging.requirements import Requirement
-        from packaging.version import Version
-    except Exception as exc:
-        return False, [f"manifest version validation is unavailable: {exc}"]
-
     versions = probed.get("packageVersions") or {}
     requirements: dict[str, Any] = dict(manifest.get("common", {}))
     for extra in manifest.get("backends", {}).get(backend, {}).get("extras", []) or []:
@@ -1954,8 +1951,6 @@ def cmd_update_runtime_core(payload: dict[str, Any]) -> int:
         return emit_error("RUNTIME_CORE_UPDATE_FAILED", "Unable to determine the installed Torch version; refusing to update the runtime core.", task_id=task_id, recoverable=True)
     constraints_path: Path | None = None
     try:
-        from packaging.requirements import Requirement
-
         # Update the selected environment directly. A failed pip run may need a retry, but must
         # never remove or replace this directory. Runtime metadata is committed after validation.
         _repair_runtime_venv_config(env_dir)

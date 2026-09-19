@@ -100,6 +100,18 @@ function Invoke-NativeChecked {
     }
 }
 
+function Assert-BootstrapRequirementParser {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$PythonPath
+    )
+
+    Invoke-NativeChecked -FilePath $PythonPath -Arguments @(
+        '-c',
+        "from pip._vendor.packaging.requirements import Requirement; from pip._vendor.packaging.version import Version; assert Requirement('pymss>=2.1').name == 'pymss'; assert Version('2.1.5') > Version('2.1.4')"
+    )
+}
+
 function Rewrite-WindowsRuntimeEnvConfigs {
     param(
         [Parameter(Mandatory = $true)]
@@ -214,6 +226,7 @@ if ($InitialBackend) {
         throw "venv python.exe was not created at $envPython"
     }
     & (Join-Path $PSScriptRoot "prune-python-runtime.ps1") -RuntimeDir $runtime -KeepVenv
+    Assert-BootstrapRequirementParser -PythonPath $runtimePython
     Invoke-NativeChecked -FilePath $envPython -Arguments @('-m', 'pip', 'install', '--upgrade', 'pip', 'setuptools', 'wheel')
 
     # Step 3: Install packages for the backend
@@ -381,6 +394,7 @@ if ($Minimal) {
     New-Item -ItemType Directory -Force -Path $sitePackages | Out-Null
     Invoke-NativeChecked -FilePath $runtimePython -Arguments @('-m', 'ensurepip', '--upgrade')
     Invoke-NativeChecked -FilePath $runtimePython -Arguments @('-m', 'pip', '--version')
+    Assert-BootstrapRequirementParser -PythonPath $runtimePython
     Write-Host "Prepared minimal Python runtime without inference dependencies"
     exit 0
 }
@@ -403,6 +417,7 @@ Invoke-NativeChecked -FilePath $runtimePython -Arguments (@('-m', 'pip', 'instal
 
 & (Join-Path $PSScriptRoot "prune-python-runtime.ps1") -RuntimeDir $runtime -KeepVenv
 Invoke-NativeChecked -FilePath $runtimePython -Arguments @('-m', 'pip', '--version')
+Assert-BootstrapRequirementParser -PythonPath $runtimePython
 $previousDontWriteBytecode = $env:PYTHONDONTWRITEBYTECODE
 $env:PYTHONDONTWRITEBYTECODE = "1"
 Invoke-NativeChecked -FilePath $runtimePython -Arguments @('-c', "import importlib.util, pymss, pymss.graph, torch, librosa, av, yaml, tqdm; print('pymss', getattr(pymss, '__version__', 'unknown'), pymss.__file__); print('torch', torch.__version__, 'cuda', torch.version.cuda, 'cuda_available', torch.cuda.is_available()); print('librosa', librosa.__version__); print('av', av.__version__); print('mlx', importlib.util.find_spec('mlx') is not None)")

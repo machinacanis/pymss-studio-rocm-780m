@@ -59,6 +59,16 @@ elif kind == "torch-index-url":
 PY
 }
 
+verify_bootstrap_requirement_parser() {
+  PYTHONHOME="$RUNTIME_HOME" "$PY" - <<'PY'
+from pip._vendor.packaging.requirements import Requirement
+from pip._vendor.packaging.version import Version
+
+assert Requirement("pymss>=2.1").name == "pymss"
+assert Version("2.1.5") > Version("2.1.4")
+PY
+}
+
 MANIFEST_COMMON_REQUIREMENTS=()
 while IFS= read -r requirement; do
   [[ -n "$requirement" ]] && MANIFEST_COMMON_REQUIREMENTS+=("$requirement")
@@ -112,6 +122,7 @@ if [[ "$OSTYPE" == darwin* && -z "$INITIAL_BACKEND" && "$VARIANT" != "mlx" && "$
   PYTHONHOME="$RUNTIME_HOME" "$PY" -m pip install --upgrade pip setuptools wheel
   bash "$(dirname "$0")/prune-python-runtime.sh" "$RUNTIME_DIR" --keep-venv
   PYTHONHOME="$RUNTIME_HOME" "$PY" -m pip --version
+  verify_bootstrap_requirement_parser
   exit 0
 fi
 
@@ -130,6 +141,7 @@ PYTHONHOME="$RUNTIME_HOME" "$PY" -m pip install --no-cache-dir --upgrade "$MANIF
 
 bash "$(dirname "$0")/prune-python-runtime.sh" "$RUNTIME_DIR" --keep-venv
 PYTHONHOME="$RUNTIME_HOME" "$PY" -m pip --version
+verify_bootstrap_requirement_parser
 
 if [[ "$OSTYPE" == darwin* && "$VARIANT" == "mlx" ]]; then
   mkdir -p "$RUNTIME_ENVS_DIR"

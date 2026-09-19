@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import builtins
 import contextlib
+import importlib
 import io
 import json
 import tempfile
@@ -202,8 +204,27 @@ class RuntimeCoreUpdateTests(unittest.TestCase):
         self.assertEqual(state["pymssVersion"], "2.1.4")
         self.assertEqual(state["manifestVersion"], "2026.09.1")
 
+    def test_update_core_uses_bundled_pip_parser_without_external_packaging(self):
+        original_import = builtins.__import__
+
+        def import_without_external_packaging(name, *args, **kwargs):
+            if name == "packaging" or name.startswith("packaging."):
+                raise ModuleNotFoundError("No module named 'packaging'", name="packaging")
+            return original_import(name, *args, **kwargs)
+
+        with mock.patch.object(builtins, "__import__", side_effect=import_without_external_packaging):
+            importlib.reload(worker_bootstrap)
+            result, commands, env_dir, _python_path = self._run_update(
+                "cuda", missing_records={}, manifest_version="2026.09.1",
+            )
+
+        self.assertEqual(result, 0)
+        self.assertEqual(len(commands), 1)
+        self.assertTrue(env_dir.is_dir())
+        self.assertEqual(self.events[-1]["type"], "runtime_core_update_finished")
+
     def test_current_manifest_keeps_dependency_bounds_without_installing_extras(self):
-        from packaging.requirements import Requirement
+        from pip._vendor.packaging.requirements import Requirement
 
         manifest = _manifest()
         manifest["common"]["av"] = "av[codec]>=1,<3"

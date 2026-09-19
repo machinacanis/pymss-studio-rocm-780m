@@ -1,6 +1,7 @@
 fn main() {
     println!("cargo:rerun-if-changed=icons");
     println!("cargo:rerun-if-changed=tauri.conf.json");
+    println!("cargo:rerun-if-changed=windows-app-manifest.xml");
     println!("cargo:rerun-if-changed=../package.json");
     for key in [
         "PYMSS_BUILD_GIT_COMMIT",
@@ -24,5 +25,8 @@ fn main() {
             println!("cargo:rustc-env={key}={value}");
         }
     }
-    tauri_build::build()
+    let windows = tauri_build::WindowsAttributes::new()
+        .app_manifest(include_str!("windows-app-manifest.xml"));
+    let attributes = tauri_build::Attributes::new().windows_attributes(windows);
+    tauri_build::try_build(attributes).expect("failed to run Tauri build script")
 }

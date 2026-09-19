@@ -53,6 +53,8 @@ const MAX_UPDATE_ARCHIVE_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_UPDATE_FILES: usize = 10_000;
 const MAX_UPDATE_EXTRACTED_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const UPDATE_MUTEX_NAME: &str = "Local\\PymssStudioManagedUpdate";
+const UPDATE_HELPER_PREFIX: &str = "pymss-studio-runtime-host";
+const ERROR_ELEVATION_REQUIRED: i32 = 740;
 // Apply an upper bound to connection setup and stalled reads without imposing a total
 // deadline on the archive download. Managed update archives can be large on slower links.
 const MANAGED_UPDATE_IO_TIMEOUT: Duration = Duration::from_secs(45);
@@ -542,7 +544,7 @@ fn stage_update(root: &Path, version: &str, signature: &str, bytes: &[u8]) -> Ap
 }
 
 fn spawn_helper(args: &[std::ffi::OsString], elevated: bool) -> AppResult<()> {
-    let helper = temp_path("pymss-studio-update-helper", "exe");
+    let helper = temp_path(UPDATE_HELPER_PREFIX, "exe");
     let current_exe = std::env::current_exe()?;
     if let Err(error) = fs::copy(&current_exe, &helper) {
         let _ = fs::remove_file(&helper);
@@ -551,8 +553,17 @@ fn spawn_helper(args: &[std::ffi::OsString], elevated: bool) -> AppResult<()> {
     let result = if elevated {
         spawn_elevated_helper(&helper, args)
     } else {
-        Command::new(&helper).args(args).spawn()?;
-        Ok(())
+        match Command::new(&helper).args(args).spawn() {
+            Ok(_) => Ok(()),
+            Err(error) if is_elevation_required(&error) => {
+                if let Some(elevated_args) = elevated_helper_args(args) {
+                    spawn_elevated_helper(&helper, &elevated_args)
+                } else {
+                    Err(error.into())
+                }
+            }
+            Err(error) => Err(error.into()),
+        }
     };
     if result.is_err() {
         let _ = fs::remove_file(helper);
@@ -965,6 +976,21 @@ fn write_update_transaction(root: &Path, backup: &Path, phase: UpdatePhase) -> A
         let _ = fs::remove_file(&temporary);
     }
     result
+}
+
+fn is_elevation_required(error: &std::io::Error) -> bool {
+    cfg!(windows) && error.raw_os_error() == Some(ERROR_ELEVATION_REQUIRED)
+}
+
+fn elevated_helper_args(args: &[std::ffi::OsString]) -> Option<Vec<std::ffi::OsString>> {
+    let elevated_mode = match args.first()?.to_str()? {
+        "--apply-managed-update" => "--apply-managed-update-elevated",
+        "--recover-managed-update" => "--recover-managed-update-elevated",
+        _ => return None,
+    };
+    let mut elevated_args = args.to_vec();
+    elevated_args[0] = elevated_mode.into();
+    Some(elevated_args)
 }
 
 fn replace_transaction_file(temporary: &Path, destination: &Path) -> AppResult<()> {
@@ -1410,7 +1436,14 @@ mod recovery_tests;
 
 #[cfg(test)]
 mod tests {
-    use super::{distribution_at, managed_endpoint, pending_archive_path, read_update_transaction, restore_portable_backup, update_archive_path, update_auto_install_supported, update_requires_manual_install, update_stage_path, update_manual_install_message, validate_payload_path, validate_update_version, write_update_transaction, DistributionKind, UpdateChannel, UpdatePhase, MAX_UPDATE_ARCHIVE_BYTES};
+    use super::{
+        distribution_at, elevated_helper_args, is_elevation_required, managed_endpoint,
+        pending_archive_path, read_update_transaction, restore_portable_backup,
+        update_archive_path, update_auto_install_supported, update_manual_install_message,
+        update_requires_manual_install, update_stage_path, validate_payload_path,
+        validate_update_version, write_update_transaction, DistributionKind, UpdateChannel,
+        UpdatePhase, ERROR_ELEVATION_REQUIRED, MAX_UPDATE_ARCHIVE_BYTES,
+    };
     use serde_json::json;
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -1434,6 +1467,32 @@ mod tests {
     #[test]
     fn update_archive_limit_matches_release_gate() {
         assert_eq!(MAX_UPDATE_ARCHIVE_BYTES, 512 * 1024 * 1024);
+    }
+
+    #[test]
+    fn helper_modes_can_be_retried_with_elevation() {
+        for (mode, elevated_mode) in [
+            ("--apply-managed-update", "--apply-managed-update-elevated"),
+            (
+                "--recover-managed-update",
+                "--recover-managed-update-elevated",
+            ),
+        ] {
+            let args = vec![mode.into(), "1234".into()];
+            let elevated_args = elevated_helper_args(&args).unwrap();
+            assert_eq!(elevated_args[0], std::ffi::OsStr::new(elevated_mode));
+            assert_eq!(elevated_args[1], std::ffi::OsStr::new("1234"));
+        }
+        assert!(elevated_helper_args(&["--unknown".into()]).is_none());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_error_740_requests_elevation_fallback() {
+        assert!(is_elevation_required(&std::io::Error::from_raw_os_error(
+            ERROR_ELEVATION_REQUIRED,
+        )));
+        assert!(!is_elevation_required(&std::io::Error::from_raw_os_error(5)));
     }
 
     #[test]

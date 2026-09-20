@@ -2,17 +2,22 @@
 import { computed, onMounted, provide, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { audioTools } from '@/features/audio-tools/registry'
+import { isAudioToolAvailable } from '@/features/audio-tools/availability'
 import { audioToolRuntimeKey, createAudioToolRuntime } from '@/features/audio-tools/runtime'
 import { loadAudioToolsState, updateAudioToolsState } from '@/features/audio-tools/state'
 import type { AudioToolCategory, AudioToolKey } from '@/features/audio-tools/types'
+import { useAppStore } from '@/stores/app'
+import { detectRuntimePlatform } from '@/utils/runtime'
 defineOptions({ name: 'ToolsView' })
 const { t } = useI18n()
+const app = useAppStore()
 const runtime = createAudioToolRuntime()
 provide(audioToolRuntimeKey, runtime)
 const activeTool = ref<AudioToolKey>('convert')
-const activeDefinition = computed(() => audioTools.find(tool => tool.id === activeTool.value) || audioTools[0])
-const mobileToolOptions = computed(() => audioTools
-  .filter(tool => !tool.hidden)
+const isMacOS = computed(() => detectRuntimePlatform(app.runtimeInfo).isMac)
+const visibleAudioTools = computed(() => audioTools.filter(tool => isAudioToolAvailable(tool, isMacOS.value)))
+const activeDefinition = computed(() => visibleAudioTools.value.find(tool => tool.id === activeTool.value) || visibleAudioTools.value[0] || audioTools[0])
+const mobileToolOptions = computed(() => visibleAudioTools.value
   .map(tool => ({ label: t(tool.titleKey), value: tool.id })))
 const categories: Array<{ id: AudioToolCategory; titleKey: string }> = [
   { id: 'convert', titleKey: 'tools.categoryConvert' },
@@ -20,9 +25,10 @@ const categories: Array<{ id: AudioToolCategory; titleKey: string }> = [
   { id: 'recognize', titleKey: 'tools.categoryRecognize' },
   { id: 'edit', titleKey: 'tools.categoryEdit' },
 ]
-const toolsByCategory = (category: AudioToolCategory) => audioTools.filter(tool => tool.category === category && !tool.hidden)
+const toolsByCategory = (category: AudioToolCategory) => visibleAudioTools.value.filter(tool => tool.category === category)
 let restored = false
-onMounted(async () => { const stored = await loadAudioToolsState(); if (stored?.activeTool && audioTools.some(tool => tool.id === stored.activeTool && !tool.hidden)) activeTool.value = stored.activeTool; restored = true; await runtime.start() })
+onMounted(async () => { const stored = await loadAudioToolsState(); if (stored?.activeTool && visibleAudioTools.value.some(tool => tool.id === stored.activeTool)) activeTool.value = stored.activeTool; restored = true; await runtime.start() })
+watch(visibleAudioTools, tools => { if (!tools.some(tool => tool.id === activeTool.value) && tools[0]) activeTool.value = tools[0].id }, { immediate: true })
 watch(activeTool, value => { if (restored) void updateAudioToolsState({ activeTool: value }) })
 </script>
 <template><div class="page tools-page audio-tools-page"><div class="page-header-compact"><div><h1>{{ t('tools.title') }}</h1><p>{{ t('tools.subtitle') }}</p></div></div>

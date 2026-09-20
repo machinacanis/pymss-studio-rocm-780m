@@ -85,7 +85,7 @@ const {
   modelListViewMode,
   modelListSortMode,
 } = storeToRefs(task)
-const { selectedModel, downloadedModels, models: modelEntries, isLoading, modelsLoaded, detailLoading, modelPreferences } = storeToRefs(model)
+const { selectedModel, downloadedModels, models: modelEntries, isLoading, modelsLoaded, detailLoading, modelPreferences, error: modelError } = storeToRefs(model)
 const { workflows, selectedWorkflow, selectedWorkflowId } = storeToRefs(workflow)
 
 const isDragging = ref(false)
@@ -116,6 +116,7 @@ if (route.query.mode === 'workflow') runMode.value = 'workflow'
 const focusedSeparationJobId = ref<string | null>(null)
 const cancellingTaskId = ref<string | null>(null)
 const audioElements = new Map<string, HTMLAudioElement>()
+const audioAccessOrder: string[] = []
 const playingOutputPath = ref('')
 const outputPlayback = ref<Record<string, { currentTime: number; duration: number }>>({})
 const draggedInputIndex = ref<number | null>(null)
@@ -133,6 +134,7 @@ const WINDOWS_RESERVED_FILENAMES = new Set([
   ...Array.from({ length: 9 }, (_, index) => `LPT${index + 1}`),
 ])
 const MAX_FILENAME_PART_BYTES = 200
+const PREVIEW_AUDIO_CACHE_LIMIT = 8
 let unlistenDragDrop: UnlistenFn | null = null
 
 const formatOptions = [
@@ -210,6 +212,8 @@ const listedDownloadedModels = computed(() => {
 })
 const selectedModelListItem = computed(() => listedDownloadedModels.value.find(item => item.name === selectedModelName.value) || null)
 const modelDownloaded = computed(() => Boolean(selectedModelListItem.value))
+const modelPanelHasModels = computed(() => modelsLoaded.value && downloadedModels.value.length > 0)
+const modelPanelLoading = computed(() => !modelsLoaded.value && (isLoading.value || app.envLoading) && !modelError.value)
 const currentModelInfo = computed(() => {
   if (model.selectedInfo?.name === selectedModelName.value) return model.selectedInfo
   return selectedModelListItem.value
@@ -747,28 +751,83 @@ function setOutputPlayback(path: string, patch: Partial<{ currentTime: number; d
   }
 }
 
+function touchPreviewAudio(path: string) {
+  const index = audioAccessOrder.indexOf(path)
+  if (index >= 0) audioAccessOrder.splice(index, 1)
+  audioAccessOrder.push(path)
+}
+
+function releasePreviewAudio(path: string) {
+  const audio = audioElements.get(path)
+  if (audio) {
+    audioElements.delete(path)
+    audio.pause()
+    audio.removeAttribute('src')
+    audio.load()
+  }
+  const accessIndex = audioAccessOrder.indexOf(path)
+  if (accessIndex >= 0) audioAccessOrder.splice(accessIndex, 1)
+  if (playingOutputPath.value === path) playingOutputPath.value = ''
+  if (outputPlayback.value[path]) {
+    const { [path]: _, ...rest } = outputPlayback.value
+    outputPlayback.value = rest
+  }
+}
+
+function trimPreviewAudioCache(protectedPath = '') {
+  while (audioElements.size > PREVIEW_AUDIO_CACHE_LIMIT) {
+    const candidate = audioAccessOrder.find(path => path !== protectedPath && path !== playingOutputPath.value)
+      || audioAccessOrder[0]
+    if (!candidate) return
+    releasePreviewAudio(candidate)
+  }
+}
+
 function getAudio(path: string) {
   const cached = audioElements.get(path)
-  if (cached) return cached
+  if (cached) {
+    touchPreviewAudio(path)
+    return cached
+  }
 
-  const audio = new Audio(convertFileSrc(path))
+  const audio = new Audio()
   audio.preload = 'metadata'
+  audio.src = convertFileSrc(path)
   audio.addEventListener('loadedmetadata', () => {
+    if (audioElements.get(path) !== audio) return
     setOutputPlayback(path, { duration: audio.duration || 0 })
   })
   audio.addEventListener('timeupdate', () => {
+    if (audioElements.get(path) !== audio) return
     setOutputPlayback(path, { currentTime: audio.currentTime || 0, duration: audio.duration || 0 })
   })
   audio.addEventListener('ended', () => {
+    if (audioElements.get(path) !== audio) return
     if (playingOutputPath.value === path) playingOutputPath.value = ''
     setOutputPlayback(path, { currentTime: 0, duration: audio.duration || 0 })
   })
   audio.addEventListener('error', () => {
+    if (audioElements.get(path) !== audio) return
     if (playingOutputPath.value === path) playingOutputPath.value = ''
   })
   audioElements.set(path, audio)
+  touchPreviewAudio(path)
+  trimPreviewAudioCache(path)
+  audio.load()
   return audio
 }
+
+function syncOutputPreviewAudio(outputs: StemOutput[]) {
+  const activePaths = new Set(outputs.map(output => output.path).filter(Boolean))
+  for (const path of [...audioElements.keys()]) {
+    if (!activePaths.has(path)) releasePreviewAudio(path)
+  }
+  outputs.slice(0, PREVIEW_AUDIO_CACHE_LIMIT).forEach((output) => {
+    if (output.path) getAudio(output.path)
+  })
+}
+
+watch(playableOutputs, syncOutputPreviewAudio, { immediate: true })
 
 async function toggleOutputPlayback(output: StemOutput) {
   if (!output.path) return
@@ -798,12 +857,8 @@ function seekOutput(path: string, value: number) {
 }
 
 function stopAllPreviewAudio() {
-  audioElements.forEach((audio) => {
-    audio.pause()
-    audio.removeAttribute('src')
-    audio.load()
-  })
-  audioElements.clear()
+  for (const path of [...audioElements.keys()]) releasePreviewAudio(path)
+  audioAccessOrder.length = 0
   playingOutputPath.value = ''
   outputPlayback.value = {}
 }
@@ -1979,9 +2034,8 @@ async function retryCurrentTask() {
               </div>
             </div>
 
-            <transition name="stage-swap" mode="out-in">
-              <div v-if="runMode === 'model'" key="model" class="target-pane" :class="{ 'target-pane--ensemble': ensembleEnabled }">
-                <template v-if="downloadedModels.length">
+            <div v-if="runMode === 'model'" key="model" class="target-pane" :class="{ 'target-pane--ensemble': ensembleEnabled }">
+                <template v-if="modelPanelHasModels">
                   <div class="target-toolbar">
                     <n-input
                       v-model:value="modelSearch"
@@ -2090,20 +2144,20 @@ async function retryCurrentTask() {
                     {{ t('separate.startHintModelMissing') }}
                   </div>
                 </template>
-                <div v-else class="stage-empty" :class="{ 'stage-empty--loading': isLoading }">
+                <div v-else class="stage-empty" :class="{ 'stage-empty--loading': modelPanelLoading }">
                   <div class="stage-empty__glyph">
-                    <n-spin v-if="isLoading" size="medium" />
+                    <n-spin v-if="modelPanelLoading" size="medium" />
                     <n-icon v-else :component="CubeOutline" />
                   </div>
-                  <strong>{{ isLoading ? t('separate.modelPanelLoadingTitle') : t('separate.modelPanelEmptyTitle') }}</strong>
-                  <p>{{ isLoading ? t('separate.modelPanelLoadingDesc') : t('separate.modelPanelEmptyDesc') }}</p>
-                  <n-button secondary :loading="isLoading" @click="model.loadModels()">
+                  <strong>{{ modelPanelLoading ? t('separate.modelPanelLoadingTitle') : t('separate.modelPanelEmptyTitle') }}</strong>
+                  <p>{{ modelPanelLoading ? t('separate.modelPanelLoadingDesc') : t('separate.modelPanelEmptyDesc') }}</p>
+                  <n-button v-if="!modelPanelLoading" secondary @click="model.loadModels()">
                     {{ t('separate.modelPanelPrimaryAction') }}
                   </n-button>
                 </div>
-              </div>
+            </div>
 
-              <div v-else key="workflow" class="target-pane">
+            <div v-else key="workflow" class="target-pane">
                 <div class="target-toolbar target-toolbar--single">
                   <n-input
                     v-model:value="workflowSearch"
@@ -2156,8 +2210,7 @@ async function retryCurrentTask() {
                     {{ t('separate.workflowCreateAction') }}
                   </n-button>
                 </div>
-              </div>
-            </transition>
+            </div>
 
             <footer class="launch-bar" :class="`launch-bar--${canStart ? 'ready' : 'idle'}`">
               <div class="launch-bar__status">

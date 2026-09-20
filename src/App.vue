@@ -6,6 +6,7 @@ import TitleBar from '@/components/TitleBar.vue'
 import SideNav from '@/components/SideNav.vue'
 import AppBrandMark from '@/components/AppBrandMark.vue'
 import StartupOnboarding from '@/components/StartupOnboarding.vue'
+import ViewportRecoveryOverlay from '@/components/ViewportRecoveryOverlay.vue'
 import { useSettingsStore } from '@/stores/settings'
 import { useAppStore } from '@/stores/app'
 import { useUpdateStore } from '@/stores/update'
@@ -330,6 +331,7 @@ const themeOverrides = computed(() => {
             </div>
           </transition>
           <StartupOnboarding v-if="showStartupOnboarding" />
+          <ViewportRecoveryOverlay :enabled="bootReady && !isStandaloneRoute" />
         </div>
         <n-modal v-model:show="deferredUpdateModalVisible" preset="dialog" type="warning" :mask-closable="false" :closable="false">
           <template #header>

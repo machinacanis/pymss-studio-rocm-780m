@@ -2035,7 +2035,8 @@ async function retryCurrentTask() {
               </div>
             </div>
 
-            <div v-if="runMode === 'model'" key="model" class="target-pane" :class="{ 'target-pane--ensemble': ensembleEnabled }">
+            <transition name="stage-swap" mode="out-in">
+              <div v-if="runMode === 'model'" key="model" class="target-pane" :class="{ 'target-pane--ensemble': ensembleEnabled }">
                 <template v-if="modelPanelHasModels">
                   <div class="target-toolbar">
                     <n-input
@@ -2156,9 +2157,9 @@ async function retryCurrentTask() {
                     {{ t('separate.modelPanelPrimaryAction') }}
                   </n-button>
                 </div>
-            </div>
+              </div>
 
-            <div v-else key="workflow" class="target-pane">
+              <div v-else key="workflow" class="target-pane">
                 <div class="target-toolbar target-toolbar--single">
                   <n-input
                     v-model:value="workflowSearch"
@@ -2211,7 +2212,8 @@ async function retryCurrentTask() {
                     {{ t('separate.workflowCreateAction') }}
                   </n-button>
                 </div>
-            </div>
+              </div>
+            </transition>
 
             <footer class="launch-bar" :class="`launch-bar--${canStart ? 'ready' : 'idle'}`">
               <div class="launch-bar__status">
@@ -4600,12 +4602,6 @@ async function retryCurrentTask() {
 
 /* ============ Responsive ============ */
 @media (max-width: 1180px) {
-  .console {
-    grid-template-columns: minmax(380px, 440px) minmax(0, 1fr);
-  }
-}
-
-@media (max-width: 1000px) {
   .separate-page {
     height: auto;
   }
@@ -4619,6 +4615,11 @@ async function retryCurrentTask() {
   .dropzone { min-height: 220px; }
   .stage-view { min-height: 440px; }
   .progress-ring-block { flex-direction: column; align-items: flex-start; gap: 18px; }
+}
+
+@media (max-height: 720px) {
+  .separate-page { height: auto; }
+  .console { min-height: 680px; }
 }
 
 @media (max-width: 640px) {

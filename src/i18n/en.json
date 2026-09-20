@@ -4,7 +4,15 @@
     "bootPreparing": "Initializing workspace...",
     "workerConnectionFailed": "Background connection failed",
     "workerConnectionFailedDetail": "Tasks can still be submitted, but progress and completion updates may be delayed. Reconnect before continuing.",
-    "workerConnectionRetry": "Reconnect"
+    "workerConnectionRetry": "Reconnect",
+    "viewportRecoveryEyebrow": "Limited display area",
+    "viewportRecoveryTitle": "The current window cannot display the interface safely",
+    "viewportRecoveryHint": "Reduce the interface scale, or drag a window edge or corner to enlarge the window. The interface will recover automatically.",
+    "viewportRecoveryCurrent": "Current viewport",
+    "viewportRecoveryRequired": "Recommended minimum",
+    "viewportRecoveryResizeHint": "The corner arrows indicate resize directions. The title bar remains available for minimize, maximize, and close actions.",
+    "viewportRecoveryScaleDown": "Reduce interface scale",
+    "viewportRecoveryScaleUp": "Increase interface scale"
   },
   "nav": {
     "separate": "Separate",

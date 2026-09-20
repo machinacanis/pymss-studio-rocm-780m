@@ -7,6 +7,7 @@ import { parse } from 'vue/compiler-sfc'
 
 const path = new URL('../src/views/SeparateView.vue', import.meta.url)
 const { descriptor } = parse(readFileSync(path, 'utf8'))
+const template = descriptor.template?.content || ''
 const script = ts.createSourceFile('SeparateView.ts', descriptor.scriptSetup.content, ts.ScriptTarget.Latest, true)
 const names = new Set([
   'modelPanelHasModels',
@@ -31,6 +32,23 @@ const code = ts.transpileModule(selected.map(statement => statement.getText(scri
 function computed(read) {
   return { get value() { return read() } }
 }
+
+test('model and workflow targets keep their keyed transition boundary', () => {
+  const transitionTag = '<transition name="stage-swap" mode="out-in">'
+  const modelBranch = '<div v-if="runMode === \'model\'" key="model"'
+  const workflowBranch = '<div v-else key="workflow"'
+  const modelIndex = template.indexOf(modelBranch)
+  const transitionIndex = template.lastIndexOf(transitionTag, modelIndex)
+  const readyIndex = template.lastIndexOf('<section v-else key="ready"', modelIndex)
+  const workflowIndex = template.indexOf(workflowBranch, modelIndex)
+  const closingIndex = template.indexOf('</transition>', workflowIndex)
+
+  assert.equal(template.split(transitionTag).length - 1, 2)
+  assert.ok(modelIndex > 0)
+  assert.ok(transitionIndex > readyIndex)
+  assert.ok(workflowIndex > modelIndex)
+  assert.ok(closingIndex > workflowIndex)
+})
 
 test('model panel waits for the live model load instead of showing cached rows', () => {
   const context = {

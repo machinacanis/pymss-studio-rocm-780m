@@ -4,7 +4,15 @@
     "bootPreparing": "正在初始化工作环境…",
     "workerConnectionFailed": "后台通信连接失败",
     "workerConnectionFailedDetail": "任务仍可提交，但进度和完成状态可能无法及时更新。请重新连接后再继续操作。",
-    "workerConnectionRetry": "重新连接"
+    "workerConnectionRetry": "重新连接",
+    "viewportRecoveryEyebrow": "显示区域受限",
+    "viewportRecoveryTitle": "当前窗口无法完整显示界面",
+    "viewportRecoveryHint": "请缩小界面比例，或拖动窗口边缘和四角扩大窗口。调整后界面会自动恢复。",
+    "viewportRecoveryCurrent": "当前可用区域",
+    "viewportRecoveryRequired": "建议至少",
+    "viewportRecoveryResizeHint": "四角箭头表示可调整方向；窗口标题栏仍可用于最小化、最大化或关闭。",
+    "viewportRecoveryScaleDown": "缩小界面比例",
+    "viewportRecoveryScaleUp": "放大界面比例"
   },
   "nav": {
     "separate": "分离",

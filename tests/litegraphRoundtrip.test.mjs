@@ -53,6 +53,71 @@ test('advanced editor locale catalogs cover every registered node type', () => {
   }
 })
 
+test('every advanced editor node type can be created, serialized and restored', () => {
+  for (const type of allNodeTypes()) {
+    const graph = new LGraph()
+    const node = LiteGraph.createNode(type)
+    assert.ok(node, `create ${type}`)
+    graph.add(node)
+
+    const exported = exportGraph(graph)
+    assert.equal(exported.nodes.length, 1, `serialize ${type}`)
+    assert.equal(exported.nodes[0].type, type, `preserve type ${type}`)
+
+    const restored = load(exported)
+    assert.equal(restored.nodes.length, 1, `restore ${type}`)
+    assert.equal(restored.nodes[0].type, type, `restore type ${type}`)
+  }
+})
+
+test('configurable builtin nodes expose runtime-compatible widget layouts', () => {
+  const expected = {
+    SaveAudio: ['filename_prefix'],
+    SaveAudioMP3: ['filename_prefix', 'quality'],
+    SaveAudioOpus: ['filename_prefix', 'bitrate'],
+    SaveAudioAdvanced: ['filename_prefix', 'format', 'quality'],
+    TrimAudioDuration: ['start_index', 'duration'],
+    AudioAdjustVolume: ['volume'],
+    EmptyAudio: ['duration', 'sample_rate', 'channels'],
+    AudioEqualizer3Band: ['low_gain_dB', 'low_freq', 'mid_gain_dB', 'mid_freq', 'mid_q', 'high_gain_dB', 'high_freq'],
+    StringSubstring: ['string', 'start', 'end'],
+    StringTrim: ['string', 'mode'],
+    CaseConverter: ['string', 'mode'],
+    RegexExtract: ['string', 'regex_pattern', 'mode', 'group_index'],
+  }
+  for (const [type, widgets] of Object.entries(expected)) {
+    const node = LiteGraph.createNode(type)
+    assert.deepEqual(node.widgets.map(widget => widget.name), widgets, type)
+  }
+  assert.deepEqual(LiteGraph.createNode('SaveAudioAdvanced').outputs.map(output => output.name), ['audio'])
+})
+
+test('legacy Studio builtin widget layouts migrate without shifting values', () => {
+  const cases = [
+    ['SaveAudio', [], ['audio']],
+    ['SaveAudioMP3', ['128k'], ['audio', '128k']],
+    ['SaveAudioOpus', ['96k'], ['audio', '96k']],
+    ['SaveAudioAdvanced', ['mp3', '44100', 'FLOAT', 'PCM_24', '192k'], ['audio', 'mp3', '192k']],
+    ['AudioConcat', ['front'], ['before']],
+    ['StringTrim', ['left'], ['', 'Left']],
+    ['CaseConverter', ['title'], ['', 'Title Case']],
+    ['RegexExtract', ['all'], ['', '', 'All Matches', 1]],
+  ]
+  for (const [type, legacy, expected] of cases) {
+    const graph = new LGraph()
+    const node = LiteGraph.createNode(type)
+    graph.add(node)
+    const source = exportGraph(graph)
+    source.nodes[0].widgets_values = legacy
+    if (type === 'SaveAudioAdvanced') source.nodes[0].outputs = []
+    const restored = load(source).nodes[0]
+    assert.deepEqual(restored.widgets.map(widget => widget.value), expected, type)
+    if (type === 'SaveAudioAdvanced') {
+      assert.deepEqual(restored.outputs.map(output => output.name), ['audio'])
+    }
+  }
+})
+
 test('advanced editor labels follow locale without changing workflow data', () => {
   const source = fixture('example_mss_separate')
   const en = translator('en')

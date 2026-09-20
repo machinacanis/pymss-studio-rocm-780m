@@ -47,6 +47,7 @@ const FIELD_KEYS: Record<string, string> = {
   find: 'find',
   flac_bit_depth: 'flacBitDepth',
   folder: 'folder',
+  format: 'outputFormat',
   group_index: 'groupIndex',
   high_end_process: 'highEndProcess',
   high_freq: 'highFrequency',

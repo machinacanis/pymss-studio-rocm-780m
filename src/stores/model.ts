@@ -3,6 +3,7 @@ import { computed, ref, watch } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { isTauriRuntime, loadAppStore, saveAppStore } from '@/utils/appStore'
 import { matchesModelQuery } from '@/utils/modelSearch'
+import { MODEL_LIBRARY_PAGE_SIZES, normalizePageSize } from '@/utils/pagination'
 import { matchesModelSource, type ModelSourceFilter } from '@/utils/modelSource'
 import { useAppStore } from '@/stores/app'
 import { registerWindowCloseGuard } from '@/utils/windowCloseGuards'
@@ -283,6 +284,7 @@ type StoredModelState = {
   modelInferenceBaseSources?: Record<string, ModelEntry['defaultInferenceParamsSource']>
   modelPreferences?: Record<string, ModelPreference>
   modelViewMode?: ModelViewMode
+  modelPageSize?: number
 }
 
 function normalizeDownloadTasks(input?: Record<string, DownloadTask>) {
@@ -435,6 +437,7 @@ export const useModelStore = defineStore('model', () => {
    * library reads, not a filter someone re-picks per visit.
    */
   const modelViewMode = ref<ModelViewMode>('list')
+  const modelPageSize = ref(24)
   const downloadStates = ref<Record<string, DownloadStatus>>({})
   const downloadErrors = ref<Record<string, string>>({})
   const downloadTasks = ref<Record<string, DownloadTask>>({})
@@ -511,6 +514,7 @@ export const useModelStore = defineStore('model', () => {
       modelInferenceBaseSources: modelInferenceBaseSources.value,
       modelPreferences: modelPreferences.value,
       modelViewMode: modelViewMode.value,
+      modelPageSize: modelPageSize.value,
     } satisfies StoredModelState)
   }
 
@@ -536,6 +540,7 @@ export const useModelStore = defineStore('model', () => {
     modelPreferences.value = normalizeModelPreferences(stored?.modelPreferences)
     // Anything unrecognised falls back to the list, which stays readable at any width.
     modelViewMode.value = stored?.modelViewMode === 'card' ? 'card' : 'list'
+    modelPageSize.value = normalizePageSize(stored?.modelPageSize, MODEL_LIBRARY_PAGE_SIZES, 24)
     if (stored?.models?.length) {
       models.value = stored.models.map((model) => normalizeModelEntryWithOverrides(model, {
         rememberBase: !modelInferenceOverrides.value[model.name],
@@ -555,6 +560,7 @@ export const useModelStore = defineStore('model', () => {
 
   watch(downloadTasks, () => queuePersist(), { deep: true })
   watch(modelViewMode, () => queuePersist())
+  watch(modelPageSize, () => queuePersist())
   watch(supportedOnly, () => {
     if (selectedInfo.value && !filteredModels.value.some((item) => item.name === selectedInfo.value?.name)) {
       selectedInfo.value = null
@@ -1585,6 +1591,7 @@ export const useModelStore = defineStore('model', () => {
     category,
     modelSource,
     modelViewMode,
+    modelPageSize,
     customModelCount,
     debugModelCount,
     downloadStates,

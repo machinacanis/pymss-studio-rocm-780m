@@ -43,6 +43,7 @@ import { buildModelCategoryOptionsFromModels, getModelCategoryLabel } from '@/ut
 import { matchesModelQuery } from '@/utils/modelSearch'
 import { sortStemOutputsByOrder } from '@/utils/stemOrder'
 import { retainAvailableModelNames } from '@/utils/modelSource'
+import { SEPARATE_MODEL_PAGE_SIZES } from '@/utils/pagination'
 import AppBrandMark from '@/components/AppBrandMark.vue'
 
 const { t, locale } = useI18n()
@@ -84,6 +85,7 @@ const {
   selectedStems,
   modelListViewMode,
   modelListSortMode,
+  modelListPageSize: modelPageSize,
 } = storeToRefs(task)
 const { selectedModel, downloadedModels, models: modelEntries, isLoading, modelsLoaded, detailLoading, modelPreferences, error: modelError } = storeToRefs(model)
 const { workflows, selectedWorkflow, selectedWorkflowId } = storeToRefs(workflow)
@@ -96,7 +98,6 @@ const showLogModal = ref(false)
 const modelSearch = ref('')
 const modelCategoryFilter = ref('')
 const modelPage = ref(1)
-const modelPageSize = ref(12)
 const workflowSearch = ref('')
 const contextMenuX = ref(0)
 const contextMenuY = ref(0)
@@ -540,7 +541,7 @@ const pagedDownloadedModels = computed(() => {
   const start = (modelPage.value - 1) * modelPageSize.value
   return filteredDownloadedModels.value.slice(start, start + modelPageSize.value)
 })
-const modelPageSizeOptions = [8, 12, 24]
+const modelPageSizeOptions = [...SEPARATE_MODEL_PAGE_SIZES]
 const filteredWorkflows = computed(() => {
   const query = workflowSearch.value.trim().toLowerCase()
   return [...workflows.value]

@@ -24,6 +24,7 @@ import {
 } from '@/features/tasks/lifecycle'
 import { normalizeStemOutputs, stemFromOutputPath, type StemOutput } from '@/utils/stemOutputs'
 import { normalizeConcurrentSeparations } from '@/features/tasks/concurrency'
+import { SEPARATE_MODEL_PAGE_SIZES, normalizePageSize } from '@/utils/pagination'
 
 export type { TaskStatus } from '@/features/tasks/lifecycle'
 export type { StemOutput } from '@/utils/stemOutputs'
@@ -147,6 +148,7 @@ type PersistedSeparateState = {
   customStemOrder?: string[]
   modelListViewMode?: 'card' | 'list'
   modelListSortMode?: ModelListSortMode
+  modelListPageSize?: number
   useTta?: boolean
   inferenceParamsByModel?: Record<string, PersistedSeparateModelState>
 }
@@ -549,6 +551,7 @@ export const useTaskStore = defineStore('task', () => {
   const separateCustomStemOrder = ref<string[]>([])
   const modelListViewMode = ref<'card' | 'list'>('card')
   const modelListSortMode = ref<ModelListSortMode>('usage')
+  const modelListPageSize = ref(12)
   const useTta = ref(false)
   const batch_size = ref<number | null>(1)
   const overlap_size = ref<number | null>(0)
@@ -604,6 +607,7 @@ export const useTaskStore = defineStore('task', () => {
       customStemOrder: [...separateCustomStemOrder.value],
       modelListViewMode: modelListViewMode.value,
       modelListSortMode: modelListSortMode.value,
+      modelListPageSize: modelListPageSize.value,
       useTta: useTta.value,
       inferenceParamsByModel: JSON.parse(JSON.stringify(persistedSeparateModelState.value)),
     }
@@ -746,6 +750,7 @@ export const useTaskStore = defineStore('task', () => {
     modelListSortMode.value = ['recent', 'favorite', 'name-asc', 'name-desc'].includes(String(separateStored?.modelListSortMode))
       ? separateStored?.modelListSortMode as ModelListSortMode
       : 'usage'
+    modelListPageSize.value = normalizePageSize(separateStored?.modelListPageSize, SEPARATE_MODEL_PAGE_SIZES, 12)
     useTta.value = separateStored?.useTta === true
     persistedSeparateModelState.value = Object.fromEntries(
       Object.entries(separateStored?.inferenceParamsByModel || {})
@@ -759,7 +764,7 @@ export const useTaskStore = defineStore('task', () => {
 
   watch(
     [separateRunMode, ensembleEnabled, ensembleModels, ensembleStem, ensembleModelStems, ensembleType, ensembleWeights, separateTemporaryOutputDir,
-      separateOutputLayout, separateOutputNamingTemplate, separateCustomStemOrder, modelListViewMode, modelListSortMode, useTta],
+      separateOutputLayout, separateOutputNamingTemplate, separateCustomStemOrder, modelListViewMode, modelListSortMode, modelListPageSize, useTta],
     () => {
       if (applyingModelDefaults) return
       queueSeparateStatePersist()
@@ -1918,6 +1923,7 @@ export const useTaskStore = defineStore('task', () => {
     separateCustomStemOrder,
     modelListViewMode,
     modelListSortMode,
+    modelListPageSize,
     useTta,
     batch_size,
     overlap_size,

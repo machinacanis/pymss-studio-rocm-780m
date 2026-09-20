@@ -34,6 +34,7 @@ import { useTaskStore } from '@/stores/task'
 import { useAppStore } from '@/stores/app'
 import { formatBytes, formatSpeedMBps } from '@/utils/format'
 import { buildModelCategoryOptionsFromPairs, getModelCategoryLabel } from '@/utils/modelCategory'
+import { MODEL_LIBRARY_PAGE_SIZES } from '@/utils/pagination'
 import ModelProgressBlock from '@/components/ModelProgressBlock.vue'
 import DownloadDetailModal from '@/components/DownloadDetailModal.vue'
 import CustomModelImportDialog from '@/components/CustomModelImportDialog.vue'
@@ -59,6 +60,7 @@ const {
   debugStatus,
   modelSource,
   modelViewMode,
+  modelPageSize: pageSize,
   customModelCount,
   debugModelCount,
   downloadTasks,
@@ -76,8 +78,7 @@ const showDownloadDetail = ref(false)
 const downloadDetailModel = ref<string>('')
 const downloadedOnly = ref(false)
 const page = ref(1)
-const pageSize = ref(24)
-const pageSizeOptions = [12, 24, 48, 96]
+const pageSizeOptions = [...MODEL_LIBRARY_PAGE_SIZES]
 type ModelSort = 'default' | 'favorite' | 'name-asc' | 'name-desc' | 'size-desc' | 'size-asc' | 'category' | 'type' | 'downloaded'
 const modelSort = ref<ModelSort>('default')
 const showStorage = ref(false)

@@ -8,6 +8,7 @@ import {
   CubeOutline,
   EllipsisHorizontalOutline,
   GitNetworkOutline,
+  ListOutline,
   MusicalNotesOutline,
   OpenOutline,
   PlayOutline,
@@ -23,7 +24,9 @@ import {
   type WorkflowEntry,
 } from '@/stores/workflow'
 import {
+  analyzeComfyOverview,
   analyzeSimpleWorkflow,
+  hydrateSimpleWorkflow,
   type SimpleWorkflowReasonCode,
 } from '@/utils/workflowSimple'
 import {
@@ -49,6 +52,9 @@ const editingId = ref('')
 const name = ref('')
 const description = ref('')
 const query = ref('')
+type WorkflowTypeFilter = 'all' | 'simple' | 'advanced'
+type WorkflowKind = Exclude<WorkflowTypeFilter, 'all'> | 'invalid'
+const typeFilter = ref<WorkflowTypeFilter>('all')
 const importFileInputRef = ref<HTMLInputElement | null>(null)
 const createChooserOpen = ref(false)
 type WorkflowCreateType = 'simple' | 'advanced'
@@ -72,14 +78,89 @@ const formatOptions = [
   { label: 'M4A', value: 'm4a' },
 ]
 
+function workflowKind(item: WorkflowEntry): WorkflowKind {
+  if (isSimpleWorkflowDefinition(item.definition)) return 'simple'
+  if (isGraphWorkflowDefinition(item.definition)) return 'advanced'
+  return 'invalid'
+}
+
+const workflowTypeCounts = computed(() => ({
+  all: workflows.value.length,
+  simple: workflows.value.filter(item => workflowKind(item) === 'simple').length,
+  advanced: workflows.value.filter(item => workflowKind(item) === 'advanced').length,
+}))
+const workflowTypeFilterOptions = computed(() => [
+  { value: 'all' as const, label: t('workflows.typeAll'), count: workflowTypeCounts.value.all },
+  { value: 'simple' as const, label: t('workflows.typeSimpleShort'), count: workflowTypeCounts.value.simple },
+  { value: 'advanced' as const, label: t('workflows.typeAdvancedShort'), count: workflowTypeCounts.value.advanced },
+])
+
 const filteredWorkflows = computed(() => {
   const value = query.value.trim().toLowerCase()
-  if (!value) return workflows.value
-  return workflows.value.filter(item =>
-    item.name.toLowerCase().includes(value)
-    || item.description.toLowerCase().includes(value),
-  )
+  return workflows.value.filter(item => {
+    if (typeFilter.value !== 'all' && workflowKind(item) !== typeFilter.value) return false
+    if (!value) return true
+    return (
+      item.name.toLowerCase().includes(value)
+      || item.description.toLowerCase().includes(value)
+    )
+  })
 })
+
+const workflowGroups = computed(() => [
+  {
+    kind: 'simple' as const,
+    label: t('workflows.typeSimple'),
+    items: filteredWorkflows.value.filter(item => workflowKind(item) === 'simple'),
+  },
+  {
+    kind: 'advanced' as const,
+    label: t('workflows.typeAdvanced'),
+    items: filteredWorkflows.value.filter(item => workflowKind(item) === 'advanced'),
+  },
+  {
+    kind: 'invalid' as const,
+    label: t('workflows.typeInvalid'),
+    items: filteredWorkflows.value.filter(item => workflowKind(item) === 'invalid'),
+  },
+].filter(group => group.items.length))
+
+const workflowListMetaMap = computed(() => Object.fromEntries(workflows.value.map((item) => {
+  if (isGraphWorkflowDefinition(item.definition)) {
+    const overview = analyzeComfyOverview(item.definition)
+    return [item.id, overview
+      ? t('workflows.listMetaAdvanced', { nodes: overview.nodeCount, outputs: overview.outputCount })
+      : t('workflows.typeAdvanced')]
+  }
+  if (isSimpleWorkflowDefinition(item.definition)) {
+    const draft = hydrateSimpleWorkflow(item.definition)
+    return [item.id, t('workflows.listMetaSimple', {
+      steps: draft.steps.length,
+      outputs: countWorkflowSaveOutputs(item.definition),
+    })]
+  }
+  return [item.id, t('workflows.workflowValidationTitle')]
+})))
+
+function workflowListMeta(item: WorkflowEntry) {
+  return workflowListMetaMap.value[item.id] || ''
+}
+
+function workflowTypeLabel(item: WorkflowEntry) {
+  const kind = workflowKind(item)
+  if (kind === 'simple') return t('workflows.typeSimpleShort')
+  if (kind === 'advanced') return t('workflows.typeAdvancedShort')
+  return t('workflows.typeInvalidShort')
+}
+
+function setWorkflowTypeFilter(value: WorkflowTypeFilter) {
+  typeFilter.value = value
+  const currentId = selectedWorkflowId.value
+  if (currentId && filteredWorkflows.value.some(item => item.id === currentId)) return
+  const fallback = filteredWorkflows.value[0] || null
+  syncWorkflowDetails(fallback)
+  workflow.selectWorkflow(fallback?.id || '')
+}
 
 const isNodeEditorOpen = computed(() => (
   isWorkflowEditorSurfaceLocked(nodeEditorOpenWorkflowId.value, selectedWorkflowId.value, nodeEditorOpenWorkflowId.value === '__new__')
@@ -140,10 +221,16 @@ const workflowMenuOptions = computed<DropdownOption[]>(() => {
 
 // ---- Selected workflow overview data (simple-mode details; comfy graphs
 // show a read-only overview since their structure is free-form) ----
-import { hydrateSimpleWorkflow, analyzeComfyOverview } from '@/utils/workflowSimple'
 const selectedComfyOverview = computed(() => analyzeComfyOverview(selectedWorkflow.value?.definition))
 const isComfyWorkflow = computed(() => isGraphWorkflowDefinition(selectedWorkflow.value?.definition))
 const isSimpleWorkflow = computed(() => isSimpleWorkflowDefinition(selectedWorkflow.value?.definition))
+const selectedWorkflowKind = computed<WorkflowKind>(() => selectedWorkflow.value
+  ? workflowKind(selectedWorkflow.value)
+  : 'invalid')
+const selectedComfyToolCount = computed(() => {
+  const overview = selectedComfyOverview.value
+  return overview ? Math.max(0, overview.nodeCount - overview.separateCount - overview.outputCount) : 0
+})
 const selectedDraft = computed(() =>
   isSimpleWorkflowDefinition(selectedWorkflow.value?.definition)
     ? hydrateSimpleWorkflow(selectedWorkflow.value?.definition)
@@ -634,29 +721,57 @@ watch([workflows, selectedWorkflowId], () => {
           <n-input v-model:value="query" clearable :placeholder="t('workflows.searchPlaceholder')">
             <template #prefix><n-icon :component="SearchOutline" /></template>
           </n-input>
+          <div class="wf-type-filter" role="tablist" :aria-label="t('workflows.typeFilterLabel')">
+            <button
+              v-for="option in workflowTypeFilterOptions"
+              :key="option.value"
+              type="button"
+              role="tab"
+              :aria-selected="typeFilter === option.value"
+              :class="{ active: typeFilter === option.value }"
+              @click="setWorkflowTypeFilter(option.value)"
+            >
+              <span>{{ option.label }}</span>
+              <small>{{ option.count }}</small>
+            </button>
+          </div>
         </div>
         <div class="wf-list-scroll">
           <div v-if="filteredWorkflows.length" class="wf-list">
-            <button
-              v-for="item in filteredWorkflows"
-              :key="item.id"
-              type="button"
-              class="wf-row"
-              :class="{ 'wf-row--active': item.id === selectedWorkflowId }"
-              @click="selectWorkflowFromList(item)"
-              @contextmenu.stop.prevent="openWorkflowContextMenu($event, item)"
-            >
-              <span class="wf-row__icon"><n-icon :component="GitNetworkOutline" /></span>
-              <span class="wf-row__main">
-                <strong>{{ item.name }}</strong>
-                <small>{{ item.description || t('workflows.noDescription') }}</small>
-              </span>
-              <span
-                class="wf-row__dot"
-                :class="isWorkflowBlocked(item) ? 'wf-row__dot--warn' : 'wf-row__dot--ok'"
-                :title="isWorkflowBlocked(item) ? t('workflows.workflowValidationTitle') : t('workflows.statusReady')"
-              />
-            </button>
+            <section v-for="group in workflowGroups" :key="group.kind" class="wf-list-group">
+              <header class="wf-list-group__head">
+                <span>{{ group.label }}</span>
+                <small>{{ group.items.length }}</small>
+              </header>
+              <button
+                v-for="item in group.items"
+                :key="item.id"
+                type="button"
+                class="wf-row"
+                :class="[
+                  `wf-row--${workflowKind(item)}`,
+                  { 'wf-row--active': item.id === selectedWorkflowId },
+                ]"
+                @click="selectWorkflowFromList(item)"
+                @contextmenu.stop.prevent="openWorkflowContextMenu($event, item)"
+              >
+                <span class="wf-row__icon">
+                  <n-icon :component="workflowKind(item) === 'simple' ? ListOutline : GitNetworkOutline" />
+                </span>
+                <span class="wf-row__main">
+                  <strong>{{ item.name }}</strong>
+                  <span class="wf-row__meta">
+                    <small class="wf-row__type">{{ workflowTypeLabel(item) }}</small>
+                    <small class="wf-row__summary">{{ workflowListMeta(item) }}</small>
+                  </span>
+                </span>
+                <span
+                  class="wf-row__dot"
+                  :class="isWorkflowBlocked(item) ? 'wf-row__dot--warn' : 'wf-row__dot--ok'"
+                  :title="isWorkflowBlocked(item) ? t('workflows.workflowValidationTitle') : t('workflows.statusReady')"
+                />
+              </button>
+            </section>
           </div>
           <div v-else class="wf-empty">
             <n-icon :component="GitNetworkOutline" />
@@ -685,7 +800,9 @@ watch([workflows, selectedWorkflowId], () => {
           <div class="wf-overview">
             <div class="wf-overview__top">
               <div class="wf-overview__heading">
-                <span class="wf-overview__icon"><n-icon :component="GitNetworkOutline" /></span>
+                <span class="wf-overview__icon" :class="`wf-overview__icon--${selectedWorkflowKind}`">
+                  <n-icon :component="isSimpleWorkflow ? ListOutline : GitNetworkOutline" />
+                </span>
                 <n-input
                   v-model:value="name"
                   class="wf-name-input"
@@ -694,6 +811,10 @@ watch([workflows, selectedWorkflowId], () => {
                   @blur="saveMeta"
                   @keydown.enter="(event: KeyboardEvent) => (event.target as HTMLElement)?.blur()"
                 />
+                <span class="wf-kind-badge" :class="`wf-kind-badge--${selectedWorkflowKind}`">
+                  <n-icon :component="isSimpleWorkflow ? ListOutline : GitNetworkOutline" />
+                  {{ selectedWorkflow ? workflowTypeLabel(selectedWorkflow) : '' }}
+                </span>
                 <span
                   class="wf-status"
                   :class="selectedReady ? 'wf-status--ok' : 'wf-status--warn'"
@@ -716,29 +837,25 @@ watch([workflows, selectedWorkflowId], () => {
             <div v-if="isComfyWorkflow && selectedComfyOverview" class="wf-metrics">
               <div class="wf-metric">
                 <strong>{{ selectedComfyOverview.separateCount }}</strong>
-                <span>{{ t('workflows.graphSummarySteps') }}</span>
+                <span>{{ t('workflows.metricSeparationNodes') }}</span>
               </div>
               <div class="wf-metric">
-                <strong>{{ selectedComfyOverview.nodeCount }}</strong>
-                <span>{{ t('workflows.metricNodes') }}</span>
+                <strong>{{ selectedComfyToolCount }}</strong>
+                <span>{{ t('workflows.metricTools') }}</span>
               </div>
               <div class="wf-metric">
                 <strong>{{ selectedComfyOverview.outputCount }}</strong>
-                <span>{{ t('workflows.graphSummaryOutputs') }}</span>
+                <span>{{ t('workflows.metricSaveNodes') }}</span>
               </div>
               <div class="wf-metric">
                 <strong>{{ selectedComfyOverview.linkCount }}</strong>
                 <span>{{ t('workflows.metricLinks') }}</span>
               </div>
             </div>
-            <div v-else-if="selectedDraft && selectedSummary" class="wf-metrics">
+            <div v-else-if="selectedDraft && selectedSummary" class="wf-metrics wf-metrics--three">
               <div class="wf-metric">
                 <strong>{{ selectedDraft.steps.length }}</strong>
                 <span>{{ t('workflows.graphSummarySteps') }}</span>
-              </div>
-              <div class="wf-metric">
-                <strong>0</strong>
-                <span>{{ t('workflows.metricTools') }}</span>
               </div>
               <div class="wf-metric">
                 <strong>{{ selectedSaveOutputCount }}</strong>
@@ -829,17 +946,17 @@ watch([workflows, selectedWorkflowId], () => {
                 size="large"
                 @click="editSimpleWorkflow(selectedWorkflow)"
               >
-                <template #icon><n-icon :component="GitNetworkOutline" /></template>
-                {{ t('workflows.simpleMode') }}
+                <template #icon><n-icon :component="ListOutline" /></template>
+                {{ t('workflows.editSimpleAction') }}
               </n-button>
               <n-button
                 v-if="isComfyWorkflow"
-                secondary
+                type="primary"
                 size="large"
                 @click="openNodeEditor({ workflowId: selectedWorkflow?.id })"
               >
                 <template #icon><n-icon :component="GitNetworkOutline" /></template>
-                {{ t('workflows.openAdvancedEditor') }}
+                {{ t('workflows.editAdvancedAction') }}
               </n-button>
               <n-button
                 secondary
@@ -982,6 +1099,67 @@ watch([workflows, selectedWorkflowId], () => {
     0 18px 46px rgba(0, 0, 0, 0.06);
 }
 
+.wf-list-head {
+  display: grid;
+  gap: 10px;
+}
+
+.wf-type-filter {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 4px;
+  padding: 4px;
+  border-radius: 11px;
+  background: color-mix(in srgb, var(--surface-2) 46%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--outline) 58%, transparent);
+}
+
+.wf-type-filter button {
+  min-width: 0;
+  height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--on-surface-muted);
+  cursor: pointer;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  transition: background 150ms ease, color 150ms ease, transform 150ms ease;
+}
+
+.wf-type-filter button:hover {
+  color: var(--on-surface);
+  background: color-mix(in srgb, var(--surface-1) 66%, transparent);
+}
+
+.wf-type-filter button:active {
+  transform: scale(0.98);
+}
+
+.wf-type-filter button:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--primary) 72%, transparent);
+  outline-offset: 1px;
+}
+
+.wf-type-filter button.active {
+  color: var(--on-surface);
+  background: color-mix(in srgb, var(--surface-1) 92%, transparent);
+  box-shadow: 0 2px 8px color-mix(in srgb, var(--primary) 10%, transparent);
+}
+
+.wf-type-filter small {
+  min-width: 15px;
+  color: inherit;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.72;
+}
+
 .wf-list-scroll {
   min-height: 0;
   overflow: auto;
@@ -991,7 +1169,28 @@ watch([workflows, selectedWorkflowId], () => {
 
 .wf-list {
   display: grid;
+  gap: 14px;
+}
+
+.wf-list-group {
+  display: grid;
   gap: 6px;
+}
+
+.wf-list-group__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 5px;
+  color: var(--on-surface-muted);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.wf-list-group__head small {
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.72;
 }
 
 .wf-row {
@@ -1020,6 +1219,7 @@ watch([workflows, selectedWorkflowId], () => {
   background:
     linear-gradient(180deg, color-mix(in srgb, var(--primary-soft) 26%, transparent), transparent 74%),
     color-mix(in srgb, var(--surface-2) 62%, transparent);
+  box-shadow: inset 3px 0 0 color-mix(in srgb, var(--primary) 78%, transparent);
 }
 
 .wf-row__icon {
@@ -1030,6 +1230,17 @@ watch([workflows, selectedWorkflowId], () => {
   border-radius: 9px;
   color: color-mix(in srgb, var(--primary-strong) 76%, var(--on-surface-muted));
   background: color-mix(in srgb, var(--primary-soft) 32%, var(--surface-2));
+}
+
+.wf-row--advanced .wf-row__icon {
+  color: color-mix(in srgb, var(--primary-strong) 88%, var(--on-surface));
+  background: color-mix(in srgb, var(--surface-1) 70%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--primary) 24%, var(--outline));
+}
+
+.wf-row--invalid .wf-row__icon {
+  color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 12%, var(--surface-2));
 }
 
 .wf-row__main {
@@ -1046,12 +1257,40 @@ watch([workflows, selectedWorkflowId], () => {
   font-weight: 600;
 }
 
-.wf-row__main small {
+.wf-row__meta {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.wf-row__type {
+  flex: 0 0 auto;
+  padding: 1px 5px;
+  border-radius: 5px;
+  color: color-mix(in srgb, var(--primary-strong) 82%, var(--on-surface));
+  background: color-mix(in srgb, var(--primary-soft) 40%, transparent);
+  font-size: 9px;
+  font-weight: 700;
+}
+
+.wf-row--advanced .wf-row__type {
+  background: transparent;
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--primary) 28%, var(--outline));
+}
+
+.wf-row--invalid .wf-row__type {
+  color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 12%, transparent);
+}
+
+.wf-row__summary {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--on-surface-muted);
-  font-size: 12px;
+  font-size: 10px;
 }
 
 .wf-row__dot {
@@ -1174,6 +1413,44 @@ watch([workflows, selectedWorkflowId], () => {
   background: color-mix(in srgb, var(--primary-soft) 34%, var(--surface-2));
 }
 
+.wf-overview__icon--advanced {
+  background: color-mix(in srgb, var(--surface-2) 68%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--primary) 24%, var(--outline));
+}
+
+.wf-overview__icon--invalid {
+  color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 12%, var(--surface-2));
+}
+
+.wf-kind-badge {
+  flex: 0 0 auto;
+  height: 25px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 9px;
+  border-radius: 7px;
+  color: color-mix(in srgb, var(--primary-strong) 84%, var(--on-surface));
+  background: color-mix(in srgb, var(--primary-soft) 38%, transparent);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.wf-kind-badge .n-icon {
+  font-size: 13px;
+}
+
+.wf-kind-badge--advanced {
+  background: transparent;
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--primary) 30%, var(--outline));
+}
+
+.wf-kind-badge--invalid {
+  color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 12%, transparent);
+}
+
 .wf-name-input {
   flex: 1 1 auto;
   min-width: 0;
@@ -1253,6 +1530,10 @@ watch([workflows, selectedWorkflowId], () => {
   gap: 10px;
 }
 
+.wf-metrics--three {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
 .wf-metric {
   display: grid;
   gap: 3px;
@@ -1267,6 +1548,7 @@ watch([workflows, selectedWorkflowId], () => {
   font-weight: 700;
   letter-spacing: -0.02em;
   line-height: 1.1;
+  font-variant-numeric: tabular-nums;
 }
 
 .wf-metric span {

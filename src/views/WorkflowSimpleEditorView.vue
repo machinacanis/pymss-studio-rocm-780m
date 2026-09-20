@@ -18,7 +18,12 @@ import {
   hydrateSimpleWorkflow,
   type SimpleDraft,
 } from '@/utils/workflowSimple'
-import { canConnectSimple, cleanupSimpleDraft, simpleStepInputTarget } from '@/utils/simpleWorkflowEditor'
+import {
+  canConnectSimple,
+  cleanupSimpleDraft,
+  simpleEnsembleInputTarget,
+  simpleStepInputTarget,
+} from '@/utils/simpleWorkflowEditor'
 import { isSimpleWorkflowDefinition } from '@/workflows/formats'
 
 const route = useRoute()
@@ -72,7 +77,20 @@ const formError = computed(() => {
     if (!canConnectSimple(draft.value, step.input, simpleStepInputTarget(step.id)).ok) return t('workflows.invalidConnection')
     if (!step.stems.length) return t('workflows.stepStemsRequired', { id: stepLabel })
   }
-  if (!draft.value.steps.some(step => Object.keys(step.save || {}).length)) return t('workflows.workflowNoSaveOutputs')
+  for (const [index, ensemble] of draft.value.ensembles.entries()) {
+    const label = t('workflows.ensembleTitle', { index: index + 1 })
+    if (!ensemble.outputStem.trim()) return t('workflows.ensembleStemRequired', { id: label })
+    if (ensemble.inputs.length < 2) return t('workflows.ensembleInputsRequired', { id: label })
+    for (const [inputIndex, input] of ensemble.inputs.entries()) {
+      if (!canConnectSimple(draft.value, input.source, simpleEnsembleInputTarget(ensemble.id, inputIndex)).ok) {
+        return t('workflows.ensembleInputsRequired', { id: label })
+      }
+      if (!Number.isFinite(input.weight) || input.weight <= 0) return t('workflows.ensembleWeightInvalid', { id: label })
+    }
+  }
+  const hasSavedStep = draft.value.steps.some(step => Object.keys(step.save || {}).length)
+  const hasSavedEnsemble = draft.value.ensembles.some(ensemble => ensemble.save)
+  if (!hasSavedStep && !hasSavedEnsemble) return t('workflows.workflowNoSaveOutputs')
   return ''
 })
 const canSave = computed(() => !formError.value && !saving.value)
@@ -108,9 +126,9 @@ function loadEntry(entry?: WorkflowEntry | null) {
     hydrated.ui = example.ui
   } else if (!hydrated.steps.length) {
     hydrated.steps = [createStepDraft(0)]
-    hydrated.ui = createDefaultSimpleEditorUi(hydrated.steps)
+    hydrated.ui = createDefaultSimpleEditorUi(hydrated.steps, hydrated.ensembles)
   } else {
-    hydrated.ui = hydrated.ui || createDefaultSimpleEditorUi(hydrated.steps)
+    hydrated.ui = hydrated.ui || createDefaultSimpleEditorUi(hydrated.steps, hydrated.ensembles)
   }
   cleanupSimpleDraft(hydrated)
   draft.value = clone(hydrated)

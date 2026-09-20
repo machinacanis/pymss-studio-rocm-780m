@@ -136,6 +136,7 @@ const workflowListMetaMap = computed(() => Object.fromEntries(workflows.value.ma
     const draft = hydrateSimpleWorkflow(item.definition)
     return [item.id, t('workflows.listMetaSimple', {
       steps: draft.steps.length,
+      ensembles: draft.ensembles.length,
       outputs: countWorkflowSaveOutputs(item.definition),
     })]
   }
@@ -238,8 +239,8 @@ const selectedDraft = computed(() =>
 const selectedSummary = computed((): { error: string } | null =>
   selectedWorkflow.value ? { error: workflowDefinitionError(selectedWorkflow.value.definition) } : null)
 const selectedStemCount = computed(() =>
-  selectedDraft.value && selectedDraft.value.steps.length
-    ? selectedDraft.value.steps.reduce((total, step) => total + step.stems.length, 0)
+  selectedDraft.value
+    ? selectedDraft.value.steps.reduce((total, step) => total + step.stems.length, 0) + selectedDraft.value.ensembles.length
     : 0)
 const selectedModels = computed(() => {
   if (isComfyWorkflow.value) {
@@ -852,10 +853,14 @@ watch([workflows, selectedWorkflowId], () => {
                 <span>{{ t('workflows.metricLinks') }}</span>
               </div>
             </div>
-            <div v-else-if="selectedDraft && selectedSummary" class="wf-metrics wf-metrics--three">
+            <div v-else-if="selectedDraft && selectedSummary" class="wf-metrics">
               <div class="wf-metric">
                 <strong>{{ selectedDraft.steps.length }}</strong>
                 <span>{{ t('workflows.graphSummarySteps') }}</span>
+              </div>
+              <div class="wf-metric">
+                <strong>{{ selectedDraft.ensembles.length }}</strong>
+                <span>{{ t('workflows.metricEnsembles') }}</span>
               </div>
               <div class="wf-metric">
                 <strong>{{ selectedSaveOutputCount }}</strong>
@@ -1528,10 +1533,6 @@ watch([workflows, selectedWorkflowId], () => {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 10px;
-}
-
-.wf-metrics--three {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
 .wf-metric {

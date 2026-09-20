@@ -1,17 +1,20 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { useMessage } from 'naive-ui'
+import { useMessage, type DropdownOption, type SelectInst } from 'naive-ui'
 import { ArrowUndoOutline, ArrowRedoOutline, CloseOutline, LocateOutline, SaveOutline } from '@vicons/ionicons5'
 import type { ModelEntry } from '@/stores/model'
 import {
   configuredStemsFor,
   createDefaultSimpleEditorUi,
+  createEnsembleDraft,
   createStepDraft,
   renderSimpleOutputFilename,
   fitSimpleEditorViewport,
+  SIMPLE_ENSEMBLE_ALGORITHMS,
   type SimpleDraft,
   type SimpleEditorPoint,
+  type SimpleEnsembleDraft,
   type SimpleStepDraft,
 } from '@/utils/workflowSimple'
 import {
@@ -19,6 +22,7 @@ import {
   cleanupSimpleDraft,
   connectSimple,
   disconnectSimple,
+  simpleEnsembleInputTarget,
   simpleSourceStepId,
   simpleSourceStem,
   simpleOutputRef,
@@ -55,19 +59,27 @@ const connectionMessageKeys: Record<string, string> = {
   'invalid-source': 'workflows.simpleConnection.invalidSource',
   'forward-link': 'workflows.simpleConnection.forwardLink',
   'self-link': 'workflows.simpleConnection.selfLink',
+  'duplicate-source': 'workflows.simpleConnection.duplicateSource',
   'invalid-save-target': 'workflows.simpleConnection.invalidSaveTarget',
 }
 const canvasRef = ref<HTMLElement | null>(null)
 const worldRef = ref<HTMLElement | null>(null)
-type SimpleConnectionTarget = `step:${string}` | `save` | `save:${string}.${string}`
+type SimpleConnectionTarget = `step:${string}` | `ensemble:${string}:${number}` | `save` | `save:${string}.${string}`
 type SimpleConnectionHoverTarget = SimpleConnectionTarget | `output:${string}` | null
 type PendingConnection =
   | { direction: 'input'; source: string; label: string }
   | { direction: 'output'; target: Exclude<SimpleConnectionTarget, 'save'>; label: string }
+type SimpleNodeType = 'separation' | 'ensemble'
 const pendingConnection = ref<PendingConnection | null>(null)
 const hoverTarget = ref<SimpleConnectionHoverTarget>(null)
 const pointerWorld = ref<SimpleEditorPoint>({ x: 500, y: 300 })
-const selectedStepId = ref('')
+const showNodeTypeChooser = ref(false)
+const pendingNodePoint = ref<SimpleEditorPoint | null>(null)
+const contextMenuVisible = ref(false)
+const contextMenuX = ref(0)
+const contextMenuY = ref(0)
+const contextMenuPoint = ref<SimpleEditorPoint | null>(null)
+const selectedNodeId = ref('')
 const history = ref<string[]>([])
 const future = ref<string[]>([])
 const drag = ref<{ id: string; dx: number; dy: number } | null>(null)
@@ -75,19 +87,86 @@ const pan = ref<{ x: number; y: number } | null>(null)
 const zoom = computed(() => draft.value.ui.viewport.zoom)
 const layoutVersion = ref(0)
 const portElements = new Map<string, HTMLElement>()
+const selectInstances = new Map<string, SelectInst>()
 let layoutFrame = 0
 let portResizeObserver: ResizeObserver | null = null
 
 const NODE_WIDTH = 300
+const ENSEMBLE_WIDTH = 320
 const INPUT_WIDTH = 230
 const SAVE_WIDTH = 340
 const NODE_HEIGHT_BASE = 166
 const PORT_GAP = 26
 const SAVE_ROW_GAP = 84
 
+function nodesOverlap(
+  first: SimpleEditorPoint,
+  firstWidth: number,
+  firstHeight: number,
+  second: SimpleEditorPoint,
+  secondWidth: number,
+  secondHeight: number,
+  gap = 20,
+) {
+  return first.x < second.x + secondWidth + gap
+    && first.x + firstWidth + gap > second.x
+    && first.y < second.y + secondHeight + gap
+    && first.y + firstHeight + gap > second.y
+}
+
 const modelOptions = computed(() => [...props.models]
   .sort((a, b) => a.name.localeCompare(b.name, locale.value === 'zh-CN' ? 'zh-CN' : 'en'))
   .map(item => ({ label: item.name, value: item.name })))
+
+const ensembleAlgorithmOptions = computed(() => {
+  const labels: Record<SimpleEnsembleDraft['algorithm'], string> = {
+    avg_wave: t('workflows.ensembleAlgorithms.avg_wave'),
+    median_wave: t('workflows.ensembleAlgorithms.median_wave'),
+    min_wave: t('workflows.ensembleAlgorithms.min_wave'),
+    max_wave: t('workflows.ensembleAlgorithms.max_wave'),
+    avg_fft: t('workflows.ensembleAlgorithms.avg_fft'),
+    median_fft: t('workflows.ensembleAlgorithms.median_fft'),
+    min_fft: t('workflows.ensembleAlgorithms.min_fft'),
+    max_fft: t('workflows.ensembleAlgorithms.max_fft'),
+  }
+  return SIMPLE_ENSEMBLE_ALGORITHMS.map(value => ({ value, label: labels[value] }))
+})
+
+const stepOutputOptions = computed(() => draft.value.steps.flatMap(step => step.stems.map(stem => ({
+  value: simpleOutputRef(step.id, stem),
+  label: `${step.model || step.id} · ${stem}`,
+}))))
+
+const ensembleSourceOptions = computed(() => [
+  { value: 'input', label: t('workflows.originalInput') },
+  ...stepOutputOptions.value,
+])
+
+function ensembleSourceLabel(source: string) {
+  if (source === 'input') return t('workflows.originalInput')
+  return stepOutputOptions.value.find(option => option.value === source)?.label
+    || source
+    || t('workflows.ensembleInputPlaceholder')
+}
+
+const nodeTypeMenuOptions = computed<DropdownOption[]>(() => [
+  { key: 'separation', label: t('workflows.separationNode') },
+  { key: 'ensemble', label: t('workflows.ensembleNode') },
+])
+
+function preferredEnsembleSources(limit = 2) {
+  for (const stem of draft.value.steps.flatMap(step => step.stems)) {
+    const matches = draft.value.steps.flatMap(step => {
+      const matchedStem = step.stems.find(item => item.toLowerCase() === stem.toLowerCase())
+      return matchedStem ? [simpleOutputRef(step.id, matchedStem)] : []
+    })
+    if (matches.length >= limit) return matches.slice(0, limit)
+  }
+  if (limit >= 2 && stepOutputOptions.value.length) {
+    return ['input', stepOutputOptions.value[0].value]
+  }
+  return stepOutputOptions.value.slice(0, limit).map(option => option.value)
+}
 
 function snapshot() {
   return JSON.stringify(draft.value)
@@ -155,6 +234,18 @@ function setPortElement(key: string, element: unknown) {
   scheduleLayoutRefresh()
 }
 
+function setSelectInstance(key: string, instance: unknown) {
+  if (instance && typeof instance === 'object' && 'blur' in instance) {
+    selectInstances.set(key, instance as SelectInst)
+  } else {
+    selectInstances.delete(key)
+  }
+}
+
+function closeSelectMenus() {
+  selectInstances.forEach((instance) => instance.blur())
+}
+
 function portPoint(key: string): SimpleEditorPoint | null {
   void layoutVersion.value
   const element = portElements.get(key)
@@ -175,6 +266,10 @@ function outputPortKey(stepId: string, stem: string) {
   return `output:${simpleOutputRef(stepId, stem)}`
 }
 
+function ensembleInputPortKey(ensembleId: string, index: number) {
+  return `ensemble-input:${ensembleId}:${index}`
+}
+
 function savePortKey(stepId: string, stem: string) {
   return `save:${simpleOutputRef(stepId, stem)}`
 }
@@ -188,17 +283,46 @@ function stepHeight(step: SimpleStepDraft) {
   return NODE_HEIGHT_BASE + Math.max(0, step.stems.length - 2) * PORT_GAP
 }
 
-function saveEntries() {
-  return draft.value.steps.flatMap(step => Object.keys(step.save || {})
-    .filter(stem => step.stems.some(item => item.toLowerCase() === stem.toLowerCase()))
-    .map(stem => ({ step, stem })))
+function ensembleHeight(ensemble: SimpleEnsembleDraft) {
+  return 206 + ensemble.inputs.length * 42
 }
 
-function saveFilenamePreview(step: SimpleStepDraft, stem: string, index: number) {
-  return renderSimpleOutputFilename(step.outputNames?.[stem], {
-    stem,
-    model: step.model || step.id,
-    stepId: step.id,
+type SaveEntry = {
+  source: string
+  stem: string
+  sourceLabel: string
+  outputName: string
+  step?: SimpleStepDraft
+  ensemble?: SimpleEnsembleDraft
+}
+
+function saveEntries() {
+  const stepEntries: SaveEntry[] = draft.value.steps.flatMap(step => Object.keys(step.save || {})
+    .filter(stem => step.stems.some(item => item.toLowerCase() === stem.toLowerCase()))
+    .map(stem => ({
+      source: simpleOutputRef(step.id, stem),
+      stem,
+      sourceLabel: step.model || step.id,
+      outputName: step.outputNames[stem] || '%filename%_%stem%_%model%',
+      step,
+    })))
+  const ensembleEntries: SaveEntry[] = draft.value.ensembles
+    .filter(ensemble => ensemble.save && ensemble.outputStem.trim())
+    .map(ensemble => ({
+      source: simpleOutputRef(ensemble.id, ensemble.outputStem.trim()),
+      stem: ensemble.outputStem.trim(),
+      sourceLabel: t('workflows.ensembleNode'),
+      outputName: ensemble.outputName || '%filename%_%stem%_Ensemble',
+      ensemble,
+    }))
+  return [...stepEntries, ...ensembleEntries]
+}
+
+function saveFilenamePreview(entry: SaveEntry, index: number) {
+  return renderSimpleOutputFilename(entry.outputName, {
+    stem: entry.stem,
+    model: entry.step?.model || (entry.ensemble ? 'Ensemble' : entry.sourceLabel),
+    stepId: entry.step?.id || entry.ensemble?.id,
     index: index + 1,
     inputName: 'input.wav',
     outputFormat: draft.value.defaultFormat,
@@ -217,6 +341,20 @@ function outputPoint(step: SimpleStepDraft, stem: string) {
   return { x: point.x + NODE_WIDTH, y: point.y + 112 + index * PORT_GAP }
 }
 
+function ensembleInputPoint(ensemble: SimpleEnsembleDraft, index: number) {
+  const measured = portPoint(ensembleInputPortKey(ensemble.id, index))
+  if (measured) return measured
+  const point = nodePoint(ensemble.id)
+  return { x: point.x, y: point.y + 116 + index * 42 }
+}
+
+function ensembleOutputPoint(ensemble: SimpleEnsembleDraft) {
+  const measured = portPoint(outputPortKey(ensemble.id, ensemble.outputStem.trim()))
+  if (measured) return measured
+  const point = nodePoint(ensemble.id)
+  return { x: point.x + ENSEMBLE_WIDTH, y: point.y + ensembleHeight(ensemble) - 34 }
+}
+
 function inputPoint(step: SimpleStepDraft) {
   const measured = portPoint(`input:${step.id}`)
   if (measured) return measured
@@ -231,11 +369,12 @@ function inputOutputPoint() {
   return { x: point.x + INPUT_WIDTH, y: point.y + 78 }
 }
 
-function saveInputPoint(stepId: string, stem: string) {
-  const measured = portPoint(savePortKey(stepId, stem))
+function saveInputPoint(sourceId: string, stem: string) {
+  const measured = portPoint(savePortKey(sourceId, stem))
   if (measured) return measured
   const point = nodePoint('save')
-  const index = saveEntries().findIndex(item => item.step.id === stepId && item.stem === stem)
+  const source = simpleOutputRef(sourceId, stem)
+  const index = saveEntries().findIndex(item => item.source === source)
   return { x: point.x, y: point.y + 106 + Math.max(0, index) * SAVE_ROW_GAP }
 }
 
@@ -244,15 +383,25 @@ function targetPoint(target: Exclude<SimpleConnectionTarget, 'save'>): SimpleEdi
     const step = draft.value.steps.find(item => item.id === target.slice('step:'.length))
     return step ? inputPoint(step) : null
   }
+  if (target.startsWith('ensemble:')) {
+    const match = /^ensemble:(.+):(\d+)$/.exec(target)
+    const ensemble = match ? draft.value.ensembles.find(item => item.id === match[1]) : null
+    return ensemble && match ? ensembleInputPoint(ensemble, Number(match[2])) : null
+  }
   const value = target.slice('save:'.length)
   return saveInputPoint(simpleSourceStepId(value), simpleSourceStem(value))
 }
 
 function sourcePoint(source: string) {
   if (source === 'input') return inputOutputPoint()
-  const step = draft.value.steps.find(item => item.id === source.slice(0, source.lastIndexOf('.')))
-  const stem = source.slice(source.lastIndexOf('.') + 1)
-  return step ? outputPoint(step, stem) : null
+  const sourceId = simpleSourceStepId(source)
+  const stem = simpleSourceStem(source)
+  const step = draft.value.steps.find(item => item.id === sourceId)
+  if (step) return outputPoint(step, stem)
+  const ensemble = draft.value.ensembles.find(item => item.id === sourceId)
+  return ensemble && ensemble.outputStem.trim().toLowerCase() === stem.toLowerCase()
+    ? ensembleOutputPoint(ensemble)
+    : null
 }
 
 function pathBetween(source: SimpleEditorPoint, target: SimpleEditorPoint) {
@@ -270,11 +419,25 @@ const connections = computed(() => {
       items.push({ id: `step:${step.id}`, path: pathBetween(source, inputPoint(step)), source: step.input, target: simpleStepInputTarget(step.id) })
     }
   })
-  saveEntries().forEach(({ step, stem }) => {
-    const source = sourcePoint(simpleOutputRef(step.id, stem))
-    const target = simpleSaveTarget(step.id, stem)
+  draft.value.ensembles.forEach((ensemble) => {
+    ensemble.inputs.forEach((input, index) => {
+      const source = sourcePoint(input.source)
+      const target = simpleEnsembleInputTarget(ensemble.id, index)
+      if (source && movingTarget !== target) {
+        items.push({ id: target, path: pathBetween(source, ensembleInputPoint(ensemble, index)), source: input.source, target })
+      }
+    })
+  })
+  saveEntries().forEach((entry) => {
+    const source = sourcePoint(entry.source)
+    const target = simpleSaveTarget(simpleSourceStepId(entry.source), simpleSourceStem(entry.source))
     if (source && movingTarget !== target) {
-      items.push({ id: `save:${step.id}.${stem}`, path: pathBetween(source, saveInputPoint(step.id, stem)), source: simpleOutputRef(step.id, stem), target })
+      items.push({
+        id: `save:${entry.source}`,
+        path: pathBetween(source, saveInputPoint(simpleSourceStepId(entry.source), entry.stem)),
+        source: entry.source,
+        target,
+      })
     }
   })
   return items
@@ -310,7 +473,7 @@ function updatePointer(event: PointerEvent) {
   }
   const target = element?.closest<HTMLElement>('[data-simple-target]')
   const value = target?.dataset.simpleTarget
-  hoverTarget.value = value === 'save' || value?.startsWith('step:') || value?.startsWith('save:')
+  hoverTarget.value = value === 'save' || value?.startsWith('step:') || value?.startsWith('ensemble:') || value?.startsWith('save:')
     ? value as SimpleConnectionHoverTarget
     : null
 }
@@ -346,7 +509,7 @@ function beginNodeDrag(id: string, event: PointerEvent) {
   const point = canvasWorldPoint(event)
   const node = nodePoint(id)
   drag.value = { id, dx: point.x - node.x, dy: point.y - node.y }
-  selectedStepId.value = draft.value.steps.some(step => step.id === id) ? id : ''
+  selectedNodeId.value = [...draft.value.steps, ...draft.value.ensembles].some(node => node.id === id) ? id : ''
   ;(event.currentTarget as HTMLElement)?.setPointerCapture(event.pointerId)
 }
 
@@ -387,13 +550,25 @@ function beginInputConnection(step: SimpleStepDraft, event: PointerEvent) {
   updatePointer(event)
 }
 
-function beginSaveConnection(step: SimpleStepDraft, stem: string, event: PointerEvent) {
+function beginEnsembleInputConnection(ensemble: SimpleEnsembleDraft, index: number, event: PointerEvent) {
   if (event.button !== 0 || pendingConnection.value) return
   event.preventDefault()
   pendingConnection.value = {
     direction: 'output',
-    target: simpleSaveTarget(step.id, stem),
-    label: `${step.model || step.id} · ${stem}`,
+    target: simpleEnsembleInputTarget(ensemble.id, index),
+    label: ensemble.inputs[index]?.source || t('workflows.ensembleInputPlaceholder'),
+  }
+  hoverTarget.value = null
+  updatePointer(event)
+}
+
+function beginSaveConnection(source: string, label: string, event: PointerEvent) {
+  if (event.button !== 0 || pendingConnection.value) return
+  event.preventDefault()
+  pendingConnection.value = {
+    direction: 'output',
+    target: simpleSaveTarget(simpleSourceStepId(source), simpleSourceStem(source)),
+    label,
   }
   hoverTarget.value = null
   updatePointer(event)
@@ -450,13 +625,16 @@ function finishOutputConnection(source: string, event: PointerEvent) {
   if (target.startsWith('save:')) {
     const previousValue = target.slice('save:'.length)
     const previousStep = draft.value.steps.find(item => item.id === simpleSourceStepId(previousValue))
-    const previousName = previousStep?.outputNames[simpleSourceStem(previousValue)]
+    const previousEnsemble = draft.value.ensembles.find(item => item.id === simpleSourceStepId(previousValue))
+    const previousName = previousStep?.outputNames[simpleSourceStem(previousValue)] || previousEnsemble?.outputName
     disconnectSimple(draft.value, target)
     connectSimple(draft.value, source, 'save')
     if (previousName?.trim()) {
       const nextStep = draft.value.steps.find(item => item.id === simpleSourceStepId(source))
+      const nextEnsemble = draft.value.ensembles.find(item => item.id === simpleSourceStepId(source))
       const nextStem = simpleSourceStem(source)
       if (nextStep && nextStem) nextStep.outputNames = { ...nextStep.outputNames, [nextStem]: previousName }
+      else if (nextEnsemble) nextEnsemble.outputName = previousName
     }
   } else {
     connectSimple(draft.value, source, target)
@@ -525,9 +703,106 @@ function updateOutputName(step: SimpleStepDraft, stem: string, value: string) {
   recordHistory()
 }
 
+function updateSaveOutputName(entry: SaveEntry, value: string) {
+  if (entry.step) {
+    updateOutputName(entry.step, entry.stem, value)
+    return
+  }
+  if (!entry.ensemble) return
+  entry.ensemble.outputName = value.trim() || '%filename%_%stem%_Ensemble'
+  recordHistory()
+}
+
+function updateEnsembleWeight(ensemble: SimpleEnsembleDraft, index: number, value: number | null) {
+  ensemble.inputs[index].weight = typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : 1
+  recordHistory()
+}
+
+function updateEnsembleAlgorithm(ensemble: SimpleEnsembleDraft, value: string) {
+  if (!SIMPLE_ENSEMBLE_ALGORITHMS.includes(value as SimpleEnsembleDraft['algorithm'])) return
+  ensemble.algorithm = value as SimpleEnsembleDraft['algorithm']
+  recordHistory()
+}
+
+function updateEnsembleStem(ensemble: SimpleEnsembleDraft, value: string) {
+  ensemble.outputStem = value
+  scheduleLayoutRefresh()
+  recordHistory()
+}
+
+function addEnsembleInput(ensemble: SimpleEnsembleDraft) {
+  if (ensemble.inputs.length >= 10) return
+  const used = new Set(ensemble.inputs.map(input => input.source))
+  const source = ensembleSourceOptions.value.find(option => !used.has(option.value))?.value || ''
+  ensemble.inputs = [...ensemble.inputs, { source, weight: 1 }]
+  recordHistory()
+}
+
+function removeEnsembleInput(ensemble: SimpleEnsembleDraft, index: number) {
+  if (ensemble.inputs.length <= 2) return
+  ensemble.inputs = ensemble.inputs.filter((_, inputIndex) => inputIndex !== index)
+  cleanupSimpleDraft(draft.value)
+  recordHistory()
+}
+
+function toggleEnsembleSave(ensemble: SimpleEnsembleDraft) {
+  const source = simpleOutputRef(ensemble.id, ensemble.outputStem.trim())
+  if (ensemble.save) {
+    disconnectSimple(draft.value, simpleSaveTarget(ensemble.id, ensemble.outputStem.trim()))
+  } else {
+    const check = canConnectSimple(draft.value, source, 'save')
+    if (!check.ok) return
+    connectSimple(draft.value, source, 'save')
+  }
+  recordHistory()
+}
+
+function closeNodeContextMenu() {
+  contextMenuVisible.value = false
+}
+
+function openNodeTypeChooser(at?: SimpleEditorPoint) {
+  closeNodeContextMenu()
+  pendingNodePoint.value = at || null
+  showNodeTypeChooser.value = true
+}
+
+function addNodeOfType(type: SimpleNodeType) {
+  const point = pendingNodePoint.value || undefined
+  if (type === 'ensemble') addEnsemble(point)
+  else addStep(point)
+  pendingNodePoint.value = null
+  showNodeTypeChooser.value = false
+  closeNodeContextMenu()
+}
+
+function openCanvasContextMenu(event: MouseEvent) {
+  const target = event.target instanceof Element ? event.target : null
+  if (target?.closest('[data-simple-node], .simple-node-editor__edge-group')) return
+  event.preventDefault()
+  contextMenuPoint.value = canvasWorldPoint(event)
+  contextMenuVisible.value = false
+  contextMenuX.value = event.clientX
+  contextMenuY.value = event.clientY
+  requestAnimationFrame(() => {
+    contextMenuVisible.value = true
+  })
+}
+
+function handleNodeContextMenuSelect(key: string | number) {
+  const point = contextMenuPoint.value || undefined
+  if (key === 'ensemble') addEnsemble(point)
+  else if (key === 'separation') addStep(point)
+  contextMenuPoint.value = null
+  closeNodeContextMenu()
+}
+
 function addStep(at?: SimpleEditorPoint) {
   const step = createStepDraft(draft.value.steps.length)
-  const usedIds = new Set(draft.value.steps.map(item => item.id))
+  const usedIds = new Set([
+    ...draft.value.steps.map(item => item.id),
+    ...draft.value.ensembles.map(item => item.id),
+  ])
   let suffix = draft.value.steps.length + 1
   let nextId = `step${suffix}`
   while (usedIds.has(nextId)) nextId = `step${++suffix}`
@@ -539,15 +814,69 @@ function addStep(at?: SimpleEditorPoint) {
   const point = at
     ? { x: Math.max(24, at.x - NODE_WIDTH / 2), y: Math.max(24, at.y - 70) }
     : { x: previousPoint.x + 340, y: previousPoint.y }
-  draft.value.ui.nodes = { ...draft.value.ui.nodes, [step.id]: point }
+  const savePoint = nodePoint('save')
+  const moveSave = nodesOverlap(point, NODE_WIDTH, stepHeight(step), savePoint, SAVE_WIDTH, saveHeight())
+  const nextSavePoint = at
+    ? { x: savePoint.x, y: point.y + stepHeight(step) + 30 }
+    : { x: point.x + NODE_WIDTH + 30, y: savePoint.y }
+  draft.value.ui.nodes = {
+    ...draft.value.ui.nodes,
+    [step.id]: point,
+    ...(moveSave ? { save: nextSavePoint } : {}),
+  }
   recordHistory()
+  if (!at) void nextTick(() => fitView(false))
+}
+
+function addEnsemble(at?: SimpleEditorPoint) {
+  const ensemble = createEnsembleDraft(draft.value.ensembles.length)
+  const usedIds = new Set([
+    ...draft.value.steps.map(item => item.id),
+    ...draft.value.ensembles.map(item => item.id),
+  ])
+  let suffix = draft.value.ensembles.length + 1
+  let nextId = `ensemble${suffix}`
+  while (usedIds.has(nextId)) nextId = `ensemble${++suffix}`
+  ensemble.id = nextId
+  const preferredSources = preferredEnsembleSources(ensemble.inputs.length)
+  const preferredStems = preferredSources.map(simpleSourceStem).filter(Boolean)
+  if (preferredStems.length === ensemble.inputs.length && preferredStems.every(stem => stem.toLowerCase() === preferredStems[0].toLowerCase())) {
+    ensemble.outputStem = preferredStems[0]
+  }
+  ensemble.inputs = ensemble.inputs.map((input, index) => ({
+    ...input,
+    source: preferredSources[index] || '',
+  }))
+  draft.value.ensembles = [...draft.value.ensembles, ensemble]
+  const previous = draft.value.ensembles[draft.value.ensembles.length - 2]
+  const lastStep = draft.value.steps[draft.value.steps.length - 1]
+  const previousPoint = previous
+    ? nodePoint(previous.id)
+    : lastStep
+      ? nodePoint(lastStep.id)
+      : { x: 360, y: 190 }
+  const point = at
+    ? { x: Math.max(24, at.x - ENSEMBLE_WIDTH / 2), y: Math.max(24, at.y - 70) }
+    : { x: previousPoint.x + 350, y: previousPoint.y }
+  const savePoint = nodePoint('save')
+  const moveSave = nodesOverlap(point, ENSEMBLE_WIDTH, ensembleHeight(ensemble), savePoint, SAVE_WIDTH, saveHeight())
+  const nextSavePoint = at
+    ? { x: savePoint.x, y: point.y + ensembleHeight(ensemble) + 30 }
+    : { x: point.x + ENSEMBLE_WIDTH + 30, y: savePoint.y }
+  draft.value.ui.nodes = {
+    ...draft.value.ui.nodes,
+    [ensemble.id]: point,
+    ...(moveSave ? { save: nextSavePoint } : {}),
+  }
+  recordHistory()
+  if (!at) void nextTick(() => fitView(false))
 }
 
 function handleCanvasDoubleClick(event: MouseEvent) {
   const target = event.target instanceof Element ? event.target : null
   if (target?.closest('[data-simple-node], .simple-node-editor__edges, button, input, select, textarea')) return
   event.preventDefault()
-  addStep(canvasWorldPoint(event))
+  openNodeTypeChooser(canvasWorldPoint(event))
 }
 
 function removeStep(step: SimpleStepDraft) {
@@ -557,26 +886,39 @@ function removeStep(step: SimpleStepDraft) {
   delete nodes[step.id]
   draft.value.ui.nodes = nodes
   cleanupSimpleDraft(draft.value)
-  selectedStepId.value = ''
+  selectedNodeId.value = ''
+  recordHistory()
+}
+
+function removeEnsemble(ensemble: SimpleEnsembleDraft) {
+  draft.value.ensembles = draft.value.ensembles.filter(item => item.id !== ensemble.id)
+  const nodes = { ...draft.value.ui.nodes }
+  delete nodes[ensemble.id]
+  draft.value.ui.nodes = nodes
+  cleanupSimpleDraft(draft.value)
+  selectedNodeId.value = ''
   recordHistory()
 }
 
 function autoLayout() {
-  const nodes: Record<string, SimpleEditorPoint> = { input: { x: 64, y: 250 }, save: { x: 360 + draft.value.steps.length * 340, y: 250 } }
+  const ensembleStartX = 360 + draft.value.steps.length * 340
+  const nodes: Record<string, SimpleEditorPoint> = {
+    input: { x: 64, y: 250 },
+    save: { x: ensembleStartX + draft.value.ensembles.length * 350, y: 250 },
+  }
   draft.value.steps.forEach((step, index) => { nodes[step.id] = { x: 360 + index * 340, y: 220 + (index % 2) * 120 } })
+  draft.value.ensembles.forEach((ensemble, index) => { nodes[ensemble.id] = { x: ensembleStartX + index * 350, y: 220 + (index % 2) * 120 } })
   draft.value.ui = { ...draft.value.ui, nodes, viewport: { x: 0, y: 0, zoom: 1 } }
   recordHistory()
 }
 
-function fitView() {
+function fitView(remember = true) {
   const canvas = canvasRef.value
   if (!canvas || canvas.clientWidth <= 0 || canvas.clientHeight <= 0) return
 
   const currentZoom = Math.max(0.01, zoom.value)
-  const stepIds = draft.value.steps.map(step => step.id)
-  let stepIndex = 0
   const bounds = Array.from(canvas.querySelectorAll<HTMLElement>('[data-simple-node]')).flatMap((element) => {
-    const id = element.dataset.simpleNode === 'step' ? stepIds[stepIndex++] : element.dataset.simpleNode
+    const id = element.dataset.simpleNode
     if (!id) return []
     const point = nodePoint(id)
     const rect = element.getBoundingClientRect()
@@ -593,11 +935,14 @@ function fitView() {
     && Math.abs(viewport.zoom - draft.value.ui.viewport.zoom) < 0.001
   ) return
   draft.value.ui.viewport = viewport
-  recordHistory()
+  if (remember) recordHistory()
+  else if (history.value.length) history.value[history.value.length - 1] = snapshot()
 }
 
 function handleWheel(event: WheelEvent) {
   event.preventDefault()
+  closeSelectMenus()
+  closeNodeContextMenu()
   const oldZoom = zoom.value
   const nextZoom = Math.min(1.8, Math.max(0.45, oldZoom * (event.deltaY > 0 ? 0.9 : 1.1)))
   const point = canvasWorldPoint(event)
@@ -633,8 +978,12 @@ watch(() => [draft.value.defaultDevice, draft.value.defaultFormat, draft.value.d
   recordHistory()
 })
 
+watch(showNodeTypeChooser, (show) => {
+  if (!show) pendingNodePoint.value = null
+})
+
 onMounted(() => {
-  if (!draft.value.ui) draft.value.ui = createDefaultSimpleEditorUi(draft.value.steps)
+  if (!draft.value.ui) draft.value.ui = createDefaultSimpleEditorUi(draft.value.steps, draft.value.ensembles)
   cleanupSimpleDraft(draft.value)
   history.value = [snapshot()]
   if (typeof ResizeObserver !== 'undefined') {
@@ -651,6 +1000,7 @@ onBeforeUnmount(() => {
   layoutFrame = 0
   portResizeObserver?.disconnect()
   portResizeObserver = null
+  selectInstances.clear()
   window.removeEventListener('keydown', onKeydown)
   window.removeEventListener('pointerup', cancelPendingConnection)
 })
@@ -666,7 +1016,7 @@ onBeforeUnmount(() => {
       <div class="simple-node-editor__actions">
         <n-button size="small" secondary :disabled="history.length <= 1" @click="undo"><template #icon><n-icon :component="ArrowUndoOutline" /></template>{{ t('common.undo') }}</n-button>
         <n-button size="small" secondary :disabled="!future.length" @click="redo"><template #icon><n-icon :component="ArrowRedoOutline" /></template>{{ t('common.redo') }}</n-button>
-        <n-button size="small" secondary @click="addStep">{{ t('workflows.addStep') }}</n-button>
+        <n-button size="small" secondary @click="openNodeTypeChooser()">{{ t('workflows.addStep') }}</n-button>
         <n-button size="small" secondary @click="autoLayout"><template #icon><n-icon :component="LocateOutline" /></template>{{ t('workflows.autoLayout') }}</n-button>
         <n-button size="small" type="primary" :loading="saving" :disabled="!canSave" @click="emit('save')"><template #icon><n-icon :component="SaveOutline" /></template>{{ t('common.save') }}</n-button>
       </div>
@@ -674,11 +1024,11 @@ onBeforeUnmount(() => {
 
     <div class="simple-node-editor__meta">
       <n-input v-model:value="description" size="small" :placeholder="t('workflows.descriptionPlaceholder')" />
-      <label><span>{{ t('workflows.defaultDevice') }}</span><n-select v-model:value="draft.defaultDevice" size="small" :options="[{ label: 'Auto', value: 'auto' }, { label: 'CPU', value: 'cpu' }, { label: 'CUDA', value: 'cuda' }, { label: 'MPS', value: 'mps' }, { label: 'MLX', value: 'mlx' }]" /></label>
-      <label><span>{{ t('workflows.defaultFormat') }}</span><n-select v-model:value="draft.defaultFormat" size="small" :options="[{ label: 'WAV', value: 'wav' }, { label: 'FLAC', value: 'flac' }, { label: 'MP3', value: 'mp3' }, { label: 'M4A', value: 'm4a' }]" /></label>
+      <label><span>{{ t('workflows.defaultDevice') }}</span><n-select :ref="(instance: unknown) => setSelectInstance('default-device', instance)" v-model:value="draft.defaultDevice" size="small" :options="[{ label: 'Auto', value: 'auto' }, { label: 'CPU', value: 'cpu' }, { label: 'CUDA', value: 'cuda' }, { label: 'MPS', value: 'mps' }, { label: 'MLX', value: 'mlx' }]" /></label>
+      <label><span>{{ t('workflows.defaultFormat') }}</span><n-select :ref="(instance: unknown) => setSelectInstance('default-format', instance)" v-model:value="draft.defaultFormat" size="small" :options="[{ label: 'WAV', value: 'wav' }, { label: 'FLAC', value: 'flac' }, { label: 'MP3', value: 'mp3' }, { label: 'M4A', value: 'm4a' }]" /></label>
     </div>
 
-    <div ref="canvasRef" class="simple-node-editor__canvas" @wheel="handleWheel" @pointermove="moveCanvas" @pointerup="endCanvasPointer" @pointercancel="endCanvasPointer" @pointerdown="beginCanvasPan" @dblclick="handleCanvasDoubleClick">
+    <div ref="canvasRef" class="simple-node-editor__canvas" @wheel="handleWheel" @pointermove="moveCanvas" @pointerup="endCanvasPointer" @pointercancel="endCanvasPointer" @pointerdown="beginCanvasPan" @dblclick="handleCanvasDoubleClick" @contextmenu.prevent="openCanvasContextMenu">
       <div class="simple-node-editor__hint">{{ pendingConnection ? t('workflows.connectingFrom') + ': ' + pendingConnection.label : t('workflows.simpleEditorHint') }}</div>
       <div ref="worldRef" class="simple-node-editor__world" :style="{ transform: `translate(${draft.ui.viewport.x}px, ${draft.ui.viewport.y}px) scale(${draft.ui.viewport.zoom})` }">
         <svg class="simple-node-editor__edges" width="2600" height="1600" viewBox="0 0 2600 1600" aria-hidden="true">
@@ -694,40 +1044,62 @@ onBeforeUnmount(() => {
           <button :ref="el => setPortElement('input:output', el)" class="simple-port simple-port--output" :class="{ 'simple-port--source-target': pendingConnection?.direction === 'output' && hoverTarget === 'output:input' }" data-simple-source="input" type="button" @pointerdown.stop="beginConnection('input', $event)" @pointerup.stop="finishOutputConnection('input', $event)"><span>{{ t('workflows.audioOutput') }}</span><i /></button>
         </article>
 
-        <article v-for="(step, index) in draft.steps" :key="step.id" class="simple-node simple-node--step" :class="{ 'simple-node--selected': selectedStepId === step.id }" :style="{ ...nodeStyle(step.id), width: `${NODE_WIDTH}px`, minHeight: `${stepHeight(step)}px` }" data-simple-node="step" @pointerdown.stop="beginNodeDrag(step.id, $event)">
+        <article v-for="(step, index) in draft.steps" :key="step.id" class="simple-node simple-node--step" :class="{ 'simple-node--selected': selectedNodeId === step.id }" :style="{ ...nodeStyle(step.id), width: `${NODE_WIDTH}px`, minHeight: `${stepHeight(step)}px` }" :data-simple-node="step.id" @pointerdown.stop="beginNodeDrag(step.id, $event)">
           <header><div><span>{{ t('workflows.separationNode') }} {{ index + 1 }}</span><strong>{{ step.model || t('workflows.stepModelPlaceholder') }}</strong></div><button type="button" class="simple-icon-button" :title="t('workflows.removeStep')" :disabled="draft.steps.length <= 1" @pointerdown.stop @click.stop="removeStep(step)"><n-icon :component="CloseOutline" /></button></header>
           <div class="simple-node__input-wrap" @pointerdown.stop>
             <button :ref="el => setPortElement(`input:${step.id}`, el)" class="simple-port simple-port--input" :class="{ 'simple-port--target': pendingConnection?.direction === 'input' && hoverTarget === `step:${step.id}` }" type="button" :data-simple-target="`step:${step.id}`" @pointerdown.stop="beginInputConnection(step, $event)" @pointerup.stop="finishConnection(`step:${step.id}`, $event)"><i /><span>{{ step.input || t('workflows.stepInputPlaceholder') }}</span></button>
           </div>
           <div class="simple-node__body" @pointerdown.stop>
-            <label><span>{{ t('workflows.stepModel') }}</span><n-select :value="step.model" size="small" filterable :options="modelOptions" :placeholder="t('workflows.stepModelPlaceholder')" @update:value="updateModel(step, $event)" /></label>
-            <label><span>{{ t('workflows.stepInput') }}</span><n-select :value="step.input" size="small" :options="[{ label: t('workflows.originalInput'), value: 'input' }, ...draft.steps.slice(0, index).flatMap(source => source.stems.map(stem => ({ label: `${source.model || source.id} · ${stem}`, value: simpleOutputRef(source.id, stem) })))]" @update:value="updateStepInput(step, String($event || ''))" /></label>
+            <label><span>{{ t('workflows.stepModel') }}</span><n-select :ref="(instance: unknown) => setSelectInstance(`step-model:${step.id}`, instance)" :value="step.model" size="small" filterable :options="modelOptions" :placeholder="t('workflows.stepModelPlaceholder')" @update:value="updateModel(step, $event)" /></label>
+            <label><span>{{ t('workflows.stepInput') }}</span><n-select :ref="(instance: unknown) => setSelectInstance(`step-input:${step.id}`, instance)" :value="step.input" size="small" :options="[{ label: t('workflows.originalInput'), value: 'input' }, ...draft.steps.slice(0, index).flatMap(source => source.stems.map(stem => ({ label: `${source.model || source.id} · ${stem}`, value: simpleOutputRef(source.id, stem) })))]" @update:value="updateStepInput(step, String($event || ''))" /></label>
           </div>
           <div class="simple-node__outputs">
             <div v-for="stem in step.stems" :key="stem" class="simple-output-row">
               <button :ref="el => setPortElement(outputPortKey(step.id, stem), el)" class="simple-port simple-port--output" :class="{ 'simple-port--source-target': pendingConnection?.direction === 'output' && hoverTarget === `output:${simpleOutputRef(step.id, stem)}` }" :data-simple-source="simpleOutputRef(step.id, stem)" type="button" @pointerdown.stop="beginConnection(simpleOutputRef(step.id, stem), $event)" @pointerup.stop="finishOutputConnection(simpleOutputRef(step.id, stem), $event)"><span>{{ stem }}</span><i /></button>
-              <n-button size="tiny" :type="step.save[stem] ? 'primary' : 'default'" secondary @pointerdown.stop @click.stop="toggleSave(step, stem)">{{ step.save[stem] ? t('workflows.saved') : t('workflows.saveStems') }}</n-button>
+              <n-button size="tiny" :type="step.save[stem] ? 'primary' : 'default'" secondary @pointerdown.stop @click.stop="toggleSave(step, stem)">{{ step.save[stem] ? t('workflows.savedOutput') : t('workflows.saveStems') }}</n-button>
             </div>
             <span v-if="!step.stems.length" class="simple-node__empty">{{ t('workflows.noStemPorts') }}</span>
+          </div>
+        </article>
+
+        <article v-for="(ensemble, index) in draft.ensembles" :key="ensemble.id" class="simple-node simple-node--ensemble" :class="{ 'simple-node--selected': selectedNodeId === ensemble.id }" :style="{ ...nodeStyle(ensemble.id), width: `${ENSEMBLE_WIDTH}px`, minHeight: `${ensembleHeight(ensemble)}px` }" :data-simple-node="ensemble.id" @pointerdown.stop="beginNodeDrag(ensemble.id, $event)">
+          <header><div><span>{{ t('workflows.ensembleNode') }} {{ index + 1 }}</span><strong>{{ ensemble.outputStem || t('workflows.ensembleStemPlaceholder') }}</strong></div><button type="button" class="simple-icon-button" :title="t('workflows.removeEnsemble')" @pointerdown.stop @click.stop="removeEnsemble(ensemble)"><n-icon :component="CloseOutline" /></button></header>
+          <div class="simple-node__body" @pointerdown.stop>
+            <label><span>{{ t('workflows.ensembleType') }}</span><n-select :ref="(instance: unknown) => setSelectInstance(`ensemble-algorithm:${ensemble.id}`, instance)" :value="ensemble.algorithm" size="small" :options="ensembleAlgorithmOptions" @update:value="updateEnsembleAlgorithm(ensemble, String($event || ''))" /></label>
+            <label><span>{{ t('workflows.ensembleStem') }}</span><n-input :value="ensemble.outputStem" size="small" :placeholder="t('workflows.ensembleStemPlaceholder')" @update:value="updateEnsembleStem(ensemble, $event)" /></label>
+          </div>
+          <div class="simple-ensemble-inputs" @pointerdown.stop>
+            <div v-for="(input, inputIndex) in ensemble.inputs" :key="inputIndex" class="simple-ensemble-input-row">
+              <button :ref="el => setPortElement(ensembleInputPortKey(ensemble.id, inputIndex), el)" class="simple-port simple-port--input simple-ensemble-input-row__port" :class="{ 'simple-port--target': pendingConnection?.direction === 'input' && hoverTarget === simpleEnsembleInputTarget(ensemble.id, inputIndex) }" type="button" :data-simple-target="simpleEnsembleInputTarget(ensemble.id, inputIndex)" @pointerdown.stop="beginEnsembleInputConnection(ensemble, inputIndex, $event)" @pointerup.stop="finishConnection(simpleEnsembleInputTarget(ensemble.id, inputIndex), $event)"><i /><span>{{ t('workflows.ensembleInput', { index: inputIndex + 1 }) }}</span></button>
+              <span class="simple-ensemble-input-row__source" :title="ensembleSourceLabel(input.source)">{{ ensembleSourceLabel(input.source) }}</span>
+              <n-input-number :value="input.weight" size="tiny" :min="0.01" :step="0.1" :show-button="false" :placeholder="t('workflows.ensembleWeight')" @update:value="updateEnsembleWeight(ensemble, inputIndex, $event)" />
+              <button type="button" class="simple-icon-button" :title="t('workflows.removeEnsembleInput')" :disabled="ensemble.inputs.length <= 2" @pointerdown.stop @click.stop="removeEnsembleInput(ensemble, inputIndex)"><n-icon :component="CloseOutline" /></button>
+            </div>
+            <n-button size="tiny" secondary :disabled="ensemble.inputs.length >= 10" @click.stop="addEnsembleInput(ensemble)">{{ t('workflows.addEnsembleInput') }}</n-button>
+          </div>
+          <div class="simple-ensemble-output-row">
+            <span class="simple-ensemble-output-row__label">{{ ensemble.outputStem || t('workflows.ensembleOutput') }}</span>
+            <n-button size="tiny" :type="ensemble.save ? 'primary' : 'default'" secondary @pointerdown.stop @click.stop="toggleEnsembleSave(ensemble)">{{ ensemble.save ? t('workflows.savedOutput') : t('workflows.saveStems') }}</n-button>
+            <button :ref="el => setPortElement(outputPortKey(ensemble.id, ensemble.outputStem.trim()), el)" class="simple-ensemble-output-port" :class="{ 'simple-ensemble-output-port--target': pendingConnection?.direction === 'output' && hoverTarget === `output:${simpleOutputRef(ensemble.id, ensemble.outputStem.trim())}` }" :aria-label="ensemble.outputStem || t('workflows.ensembleOutput')" :data-simple-source="simpleOutputRef(ensemble.id, ensemble.outputStem.trim())" type="button" @pointerdown.stop="beginConnection(simpleOutputRef(ensemble.id, ensemble.outputStem.trim()), $event)" @pointerup.stop="finishOutputConnection(simpleOutputRef(ensemble.id, ensemble.outputStem.trim()), $event)"><i /></button>
           </div>
         </article>
 
         <article class="simple-node simple-node--save" data-simple-node="save" :style="{ ...nodeStyle('save'), width: `${SAVE_WIDTH}px`, minHeight: `${saveHeight()}px` }" @pointerdown.stop="beginNodeDrag('save', $event)">
           <header><div><span>{{ t('workflows.saveNode') }}</span><strong>{{ t('workflows.generatedOutputs') }}</strong></div><span class="simple-node__count">{{ saveEntries().length }}</span></header>
           <button class="simple-save-drop-target" :class="{ 'simple-save-drop-target--active': pendingConnection && hoverTarget === 'save' }" type="button" data-simple-target="save" @pointerdown.stop @pointerup="finishConnection('save', $event)">{{ t('workflows.dropStemToSave') }}</button>
-          <div v-for="(entry, index) in saveEntries()" :key="`${entry.step.id}:${entry.stem}`" class="simple-save-row">
-            <i :ref="el => setPortElement(savePortKey(entry.step.id, entry.stem), el)" class="simple-save-row__port" :class="{ 'simple-save-row__port--active': pendingConnection?.direction === 'output' && pendingConnection.target === simpleSaveTarget(entry.step.id, entry.stem), 'simple-save-row__port--target': pendingConnection?.direction === 'input' && hoverTarget === simpleSaveTarget(entry.step.id, entry.stem) }" :data-simple-target="simpleSaveTarget(entry.step.id, entry.stem)" @pointerdown.stop="beginSaveConnection(entry.step, entry.stem, $event)" @pointerup.stop="finishConnection(simpleSaveTarget(entry.step.id, entry.stem), $event)" />
+          <div v-for="(entry, index) in saveEntries()" :key="entry.source" class="simple-save-row">
+            <i :ref="el => setPortElement(savePortKey(simpleSourceStepId(entry.source), entry.stem), el)" class="simple-save-row__port" :class="{ 'simple-save-row__port--active': pendingConnection?.direction === 'output' && pendingConnection.target === simpleSaveTarget(simpleSourceStepId(entry.source), entry.stem), 'simple-save-row__port--target': pendingConnection?.direction === 'input' && hoverTarget === simpleSaveTarget(simpleSourceStepId(entry.source), entry.stem) }" :data-simple-target="simpleSaveTarget(simpleSourceStepId(entry.source), entry.stem)" @pointerdown.stop="beginSaveConnection(entry.source, `${entry.sourceLabel} · ${entry.stem}`, $event)" @pointerup.stop="finishConnection(simpleSaveTarget(simpleSourceStepId(entry.source), entry.stem), $event)" />
             <div class="simple-save-row__details">
               <div class="simple-save-row__source">
-                <span class="simple-save-row__source-model" :title="entry.step.model || entry.step.id">{{ entry.step.model || entry.step.id }}</span>
+                <span class="simple-save-row__source-model" :title="entry.sourceLabel">{{ entry.sourceLabel }}</span>
                 <span class="simple-save-row__source-separator">·</span>
                 <strong>{{ entry.stem }}</strong>
               </div>
-              <div class="simple-save-row__preview" :title="saveFilenamePreview(entry.step, entry.stem, index)">
+              <div class="simple-save-row__preview" :title="saveFilenamePreview(entry, index)">
                 <span class="simple-save-row__preview-label">{{ t('workflows.saveFilenamePreview') }}</span>
-                <code>{{ saveFilenamePreview(entry.step, entry.stem, index) }}</code>
+                <code>{{ saveFilenamePreview(entry, index) }}</code>
               </div>
-              <n-input size="tiny" :value="entry.step.outputNames[entry.stem]" :placeholder="'%filename%_%stem%_%model%'" @pointerdown.stop @update:value="updateOutputName(entry.step, entry.stem, $event)" />
+              <n-input size="tiny" :value="entry.outputName" :placeholder="'%filename%_%stem%_%model%'" @pointerdown.stop @update:value="updateSaveOutputName(entry, $event)" />
             </div>
           </div>
           <span v-if="!saveEntries().length" class="simple-node__empty">{{ t('workflows.saveStemsPlaceholder') }}</span>
@@ -740,6 +1112,33 @@ onBeforeUnmount(() => {
       <span v-else>{{ t('workflows.simpleEditorHint') }}</span>
       <div><n-button secondary :disabled="!canSave || saving" @click="emit('run')">{{ t('workflows.runWorkflowAction') }}</n-button><n-button quaternary @click="fitView">{{ t('workflows.fitView') }}</n-button></div>
     </footer>
+
+    <n-modal v-model:show="showNodeTypeChooser" preset="card" :title="t('workflows.chooseNodeTypeTitle')" class="simple-node-type-modal" style="width: min(640px, calc(100vw - 32px))" :z-index="5000">
+      <p class="simple-node-type-modal__hint">{{ t('workflows.chooseNodeTypeHint') }}</p>
+      <div class="simple-node-type-modal__choices">
+        <button type="button" @click="addNodeOfType('separation')">
+          <span>{{ t('workflows.separationNode') }}</span>
+          <strong>{{ t('workflows.separationNodeChoiceTitle') }}</strong>
+          <small>{{ t('workflows.separationNodeChoiceDescription') }}</small>
+        </button>
+        <button type="button" @click="addNodeOfType('ensemble')">
+          <span>Ensemble</span>
+          <strong>{{ t('workflows.ensembleNode') }}</strong>
+          <small>{{ t('workflows.ensembleNodeChoiceDescription') }}</small>
+        </button>
+      </div>
+    </n-modal>
+
+    <n-dropdown
+      placement="bottom-start"
+      trigger="manual"
+      :x="contextMenuX"
+      :y="contextMenuY"
+      :options="nodeTypeMenuOptions"
+      :show="contextMenuVisible"
+      @clickoutside="closeNodeContextMenu"
+      @select="handleNodeContextMenuSelect"
+    />
   </div>
 </template>
 
@@ -838,7 +1237,7 @@ onBeforeUnmount(() => {
 .simple-node-editor__canvas {
   position: relative;
   min-height: 0;
-  overflow: hidden;
+  overflow: clip;
   border: 1px solid color-mix(in srgb, var(--outline) 78%, transparent);
   border-radius: 16px;
   cursor: grab;
@@ -870,6 +1269,8 @@ onBeforeUnmount(() => {
 
 .simple-node-editor__world {
   position: absolute;
+  top: 0;
+  left: 0;
   width: 2600px;
   height: 1600px;
   transform-origin: 0 0;
@@ -937,6 +1338,11 @@ onBeforeUnmount(() => {
   background: color-mix(in srgb, var(--primary-soft) 62%, var(--surface-1));
 }
 
+.simple-node--ensemble {
+  border-color: color-mix(in srgb, #8b5cf6 62%, var(--outline));
+  background: color-mix(in srgb, #8b5cf6 9%, var(--surface-1));
+}
+
 .simple-node--save {
   border-color: color-mix(in srgb, var(--warning) 64%, var(--outline));
   background: color-mix(in srgb, var(--warning) 8%, var(--surface-1));
@@ -969,6 +1375,7 @@ onBeforeUnmount(() => {
 
 .simple-node--input header span { color: var(--success); }
 .simple-node--step header span { color: var(--primary-strong); }
+.simple-node--ensemble header span { color: color-mix(in srgb, #8b5cf6 80%, var(--on-surface)); }
 .simple-node--save header span { color: var(--warning); }
 
 .simple-node header strong {
@@ -995,6 +1402,7 @@ onBeforeUnmount(() => {
 .simple-icon-button:hover { background: color-mix(in srgb, var(--danger) 12%, transparent); color: var(--danger); }
 .simple-icon-button:focus-visible,
 .simple-port:focus-visible,
+.simple-ensemble-output-port:focus-visible,
 .simple-save-drop-target:focus-visible,
 .simple-save-row__port:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
 
@@ -1069,6 +1477,17 @@ onBeforeUnmount(() => {
 .simple-node__outputs { display: grid; gap: 4px; margin-top: 5px; }
 .simple-output-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 5px; align-items: center; }
 .simple-output-row :deep(.n-button) { font-size: 11px; }
+.simple-ensemble-inputs { display: grid; gap: 7px; }
+.simple-ensemble-input-row { display: grid; grid-template-columns: 76px minmax(0, 1fr) 54px 24px; gap: 5px; align-items: center; }
+.simple-ensemble-input-row__port { left: -13px; width: 89px; font-size: 10px; }
+.simple-ensemble-input-row__source { min-width: 0; overflow: hidden; padding: 3px 6px; border-radius: 6px; background: color-mix(in srgb, var(--surface-2) 56%, transparent); color: var(--on-surface-muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.simple-ensemble-input-row :deep(.n-input-number) { width: 54px; }
+.simple-ensemble-input-row :deep(.n-input__input-el) { text-align: center; }
+.simple-ensemble-output-row { position: relative; min-height: 26px; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; align-items: center; margin-top: 2px; padding-right: 8px; }
+.simple-ensemble-output-row__label { min-width: 0; overflow: hidden; color: var(--on-surface); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.simple-ensemble-output-port { position: absolute; top: 50%; right: -18px; width: 20px; height: 26px; display: grid; place-items: center; padding: 0; border: 0; background: transparent; cursor: crosshair; transform: translateY(-50%); touch-action: none; }
+.simple-ensemble-output-port i { width: 9px; height: 9px; border-radius: 50%; background: var(--primary); box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 22%, transparent); }
+.simple-ensemble-output-port--target i { outline: 2px solid var(--primary-strong); outline-offset: 2px; }
 .simple-node__empty { color: var(--on-surface-muted); font-size: 12px; }
 .simple-node__count { color: var(--warning) !important; }
 
@@ -1125,6 +1544,62 @@ onBeforeUnmount(() => {
 .simple-node-editor__footer > div { display: flex; gap: 8px; flex: 0 0 auto; }
 .simple-node-editor__error { color: var(--danger); }
 
+.simple-node-type-modal {
+  z-index: 4000 !important;
+  background: var(--surface-1) !important;
+  box-shadow: 0 24px 70px color-mix(in srgb, #000 28%, transparent) !important;
+}
+
+.simple-node-type-modal__hint {
+  margin: 0 0 14px;
+  color: var(--on-surface-muted);
+  font-size: 13px;
+}
+
+.simple-node-type-modal__choices {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.simple-node-type-modal__choices button {
+  min-width: 0;
+  display: grid;
+  gap: 6px;
+  padding: 16px;
+  border: 1px solid color-mix(in srgb, var(--outline) 84%, transparent);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--surface-2) 54%, transparent);
+  color: var(--on-surface);
+  cursor: pointer;
+  text-align: left;
+  transition: border-color 140ms ease, background 140ms ease, transform 140ms ease;
+}
+
+.simple-node-type-modal__choices button:hover,
+.simple-node-type-modal__choices button:focus-visible {
+  border-color: var(--primary);
+  background: color-mix(in srgb, var(--primary-soft) 56%, var(--surface-2));
+  outline: none;
+  transform: translateY(-1px);
+}
+
+.simple-node-type-modal__choices button > span {
+  color: var(--primary-strong);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.simple-node-type-modal__choices button > strong {
+  font-size: 15px;
+}
+
+.simple-node-type-modal__choices button > small {
+  color: var(--on-surface-muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
 @media (max-width: 900px) {
   .simple-node-editor__meta { flex-wrap: wrap; }
   .simple-node-editor__switch { margin-left: 0; }
@@ -1133,5 +1608,6 @@ onBeforeUnmount(() => {
   .simple-node-editor__footer { align-items: flex-start; flex-direction: column; }
   .simple-node-editor__footer > span { width: 100%; }
   .simple-node-editor__footer > div { width: 100%; flex-wrap: wrap; }
+  .simple-node-type-modal__choices { grid-template-columns: 1fr; }
 }
 </style>

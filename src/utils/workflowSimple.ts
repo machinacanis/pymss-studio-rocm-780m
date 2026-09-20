@@ -9,17 +9,17 @@ import { analyzeWorkflowInputs } from '@/utils/workflowInputs'
 /**
  * Simple creator <-> pymss YAML workflow adapter.
  *
- * The simple creator edits a linear list of steps (one model per step, each
- * step consumes `input` or a previous step's stem, and saves chosen stems).
- * We now store this directly as a pymss YAML workflow dict:
+ * The simple creator edits a linear list of separation steps plus optional
+ * Studio Ensemble nodes. Separation steps are stored directly as a pymss YAML
+ * workflow dict:
  *
  *   { version: 1, defaults: { device, output_format, inference_params },
  *     steps: [ { id, model, input, stems, save, output_names, ... } ] }
  *
- * pymss.workflow.load_workflow_data parses this and compile_workflow_to_dag
- * builds the DAG that run_dag executes. ``save`` keeps pymss' directory
- * contract while ``output_names`` is consumed by the Studio worker to wire
- * user-facing filename hints into each save node.
+ * pymss.workflow.load_workflow_data parses the native subset and
+ * compile_workflow_to_dag builds the base DAG. The Studio worker then appends
+ * ``ensembles`` as native pymss graph nodes. ``save`` keeps pymss' directory
+ * contract while filename metadata is wired into each save node by the worker.
  */
 export type SimpleWorkflowReasonCode =
   | 'graph_workflow'
@@ -44,6 +44,28 @@ export type PymssYamlStep = {
   use_tta?: boolean
 }
 
+export const SIMPLE_ENSEMBLE_ALGORITHMS = [
+  'avg_wave',
+  'median_wave',
+  'min_wave',
+  'max_wave',
+  'avg_fft',
+  'median_fft',
+  'min_fft',
+  'max_fft',
+] as const
+
+export type SimpleEnsembleAlgorithm = typeof SIMPLE_ENSEMBLE_ALGORITHMS[number]
+
+export type PymssYamlEnsemble = {
+  id: string
+  inputs: Array<{ source: string; weight: number }>
+  algorithm: SimpleEnsembleAlgorithm
+  output_stem: string
+  save?: string | false
+  output_name?: string
+}
+
 export type PymssYamlWorkflow = {
   version: number
   defaults: {
@@ -55,6 +77,8 @@ export type PymssYamlWorkflow = {
   /** Studio-only canvas state; ignored by pymss at runtime. */
   studio?: SimpleEditorUi
   steps: PymssYamlStep[]
+  /** Studio extension compiled into pymss DAG nodes by the worker. */
+  ensembles?: PymssYamlEnsemble[]
 }
 
 export type SimpleStepDraft = {
@@ -64,6 +88,15 @@ export type SimpleStepDraft = {
   stems: string[]
   save: Record<string, string>
   outputNames: Record<string, string>
+}
+
+export type SimpleEnsembleDraft = {
+  id: string
+  inputs: Array<{ source: string; weight: number }>
+  algorithm: SimpleEnsembleAlgorithm
+  outputStem: string
+  save: boolean
+  outputName: string
 }
 
 export type SimpleEditorPoint = { x: number; y: number }
@@ -121,6 +154,7 @@ export type SimpleDraft = {
   defaultFormat: string
   defaultNormalize: boolean
   steps: SimpleStepDraft[]
+  ensembles: SimpleEnsembleDraft[]
   ui: SimpleEditorUi
 }
 
@@ -170,7 +204,7 @@ export function hydrateSimpleWorkflow(definition: unknown): SimpleDraft {
   if (!isRecord(definition) || !Array.isArray(definition.steps)) {
     return {
       defaultDevice: 'auto', defaultFormat: 'wav', defaultNormalize: false,
-      steps: [], ui: createDefaultSimpleEditorUi(),
+      steps: [], ensembles: [], ui: createDefaultSimpleEditorUi(),
     }
   }
   const defaults = isRecord(definition.defaults) ? definition.defaults : {}
@@ -193,12 +227,35 @@ export function hydrateSimpleWorkflow(definition: unknown): SimpleDraft {
         ? Object.fromEntries(Object.entries(raw.output_names).map(([k, v]) => [k, String(v)]))
         : {},
     }))
+  const ensembles = (Array.isArray(definition.ensembles) ? definition.ensembles : [])
+    .filter(isRecord)
+    .map((raw, index): SimpleEnsembleDraft => {
+      const algorithm = String(raw.algorithm || 'avg_wave')
+      return {
+        id: String(raw.id || `ensemble${index + 1}`),
+        inputs: (Array.isArray(raw.inputs) ? raw.inputs : [])
+          .filter(isRecord)
+          .map(input => ({
+            source: String(input.source || ''),
+            weight: Number.isFinite(Number(input.weight)) && Number(input.weight) > 0
+              ? Number(input.weight)
+              : 1,
+          })),
+        algorithm: SIMPLE_ENSEMBLE_ALGORITHMS.includes(algorithm as SimpleEnsembleAlgorithm)
+          ? algorithm as SimpleEnsembleAlgorithm
+          : 'avg_wave',
+        outputStem: String(raw.output_stem || ''),
+        save: typeof raw.save === 'string' ? Boolean(raw.save.trim()) : raw.save === true,
+        outputName: String(raw.output_name || '%filename%_%stem%_Ensemble'),
+      }
+    })
   return {
     defaultDevice: String(defaults.device || 'auto'),
     defaultFormat: String(defaults.output_format || 'wav'),
     defaultNormalize: Boolean(inference.normalize),
     steps,
-    ui: hydrateSimpleEditorUi(definition.studio, steps),
+    ensembles,
+    ui: hydrateSimpleEditorUi(definition.studio, steps, ensembles),
   }
 }
 
@@ -211,7 +268,7 @@ export function buildSimpleWorkflowDefinition(draft: SimpleDraft): PymssYamlWork
       output_format: draft.defaultFormat || 'wav',
       inference_params: { normalize: Boolean(draft.defaultNormalize) },
     },
-    studio: normalizeSimpleEditorUi(draft.ui, draft.steps),
+    studio: normalizeSimpleEditorUi(draft.ui, draft.steps, draft.ensembles),
     steps: draft.steps.map((step, index) => ({
       id: step.id || `step${index + 1}`,
       model: step.model,
@@ -220,22 +277,51 @@ export function buildSimpleWorkflowDefinition(draft: SimpleDraft): PymssYamlWork
       save: { ...step.save },
       output_names: { ...step.outputNames },
     })),
+    ...(draft.ensembles.length
+      ? {
+          ensembles: draft.ensembles.map((ensemble, index) => ({
+            id: ensemble.id || `ensemble${index + 1}`,
+            inputs: ensemble.inputs.map(input => ({
+              source: input.source,
+              weight: Number.isFinite(input.weight) && input.weight > 0 ? input.weight : 1,
+            })),
+            algorithm: ensemble.algorithm,
+            output_stem: ensemble.outputStem.trim(),
+            save: ensemble.save ? 'Default' : false,
+            output_name: ensemble.outputName.trim() || '%filename%_%stem%_Ensemble',
+          })),
+        }
+      : {}),
   }
 }
 
-export function createDefaultSimpleEditorUi(steps: SimpleStepDraft[] = []): SimpleEditorUi {
+export function createDefaultSimpleEditorUi(
+  steps: SimpleStepDraft[] = [],
+  ensembles: SimpleEnsembleDraft[] = [],
+): SimpleEditorUi {
+  const saveX = Math.max(1040, 360 + (steps.length + ensembles.length) * 330)
   const nodes: Record<string, SimpleEditorPoint> = {
     input: { x: 64, y: 220 },
-    save: { x: 1040, y: 220 },
+    save: { x: saveX, y: 220 },
   }
   steps.forEach((step, index) => {
     nodes[step.id || `step${index + 1}`] = { x: 360 + index * 330, y: 190 + (index % 2) * 140 }
   })
+  ensembles.forEach((ensemble, index) => {
+    nodes[ensemble.id || `ensemble${index + 1}`] = {
+      x: 360 + steps.length * 330 + index * 330,
+      y: 220 + (index % 2) * 140,
+    }
+  })
   return { editor: 'simple', viewport: { x: 0, y: 0, zoom: 1 }, nodes }
 }
 
-function hydrateSimpleEditorUi(value: unknown, steps: SimpleStepDraft[]): SimpleEditorUi {
-  const fallback = createDefaultSimpleEditorUi(steps)
+function hydrateSimpleEditorUi(
+  value: unknown,
+  steps: SimpleStepDraft[],
+  ensembles: SimpleEnsembleDraft[],
+): SimpleEditorUi {
+  const fallback = createDefaultSimpleEditorUi(steps, ensembles)
   if (!isRecord(value)) return fallback
   const viewportValue = isRecord(value.viewport) ? value.viewport : {}
   const nodeValues = isRecord(value.nodes) ? value.nodes : {}
@@ -253,6 +339,10 @@ function hydrateSimpleEditorUi(value: unknown, steps: SimpleStepDraft[]): Simple
     const id = step.id || `step${index + 1}`
     if (!nodes[id]) nodes[id] = { x: 360 + index * 330, y: 190 + (index % 2) * 140 }
   })
+  ensembles.forEach((ensemble, index) => {
+    const id = ensemble.id || `ensemble${index + 1}`
+    if (!nodes[id]) nodes[id] = { x: 360 + steps.length * 330 + index * 330, y: 220 + (index % 2) * 140 }
+  })
   return {
     editor: 'simple',
     viewport: {
@@ -264,9 +354,18 @@ function hydrateSimpleEditorUi(value: unknown, steps: SimpleStepDraft[]): Simple
   }
 }
 
-function normalizeSimpleEditorUi(value: SimpleEditorUi | undefined, steps: SimpleStepDraft[]): SimpleEditorUi {
-  const hydrated = hydrateSimpleEditorUi(value, steps)
-  const validIds = new Set(['input', 'save', ...steps.map((step, index) => step.id || `step${index + 1}`)])
+function normalizeSimpleEditorUi(
+  value: SimpleEditorUi | undefined,
+  steps: SimpleStepDraft[],
+  ensembles: SimpleEnsembleDraft[],
+): SimpleEditorUi {
+  const hydrated = hydrateSimpleEditorUi(value, steps, ensembles)
+  const validIds = new Set([
+    'input',
+    'save',
+    ...steps.map((step, index) => step.id || `step${index + 1}`),
+    ...ensembles.map((ensemble, index) => ensemble.id || `ensemble${index + 1}`),
+  ])
   hydrated.nodes = Object.fromEntries(Object.entries(hydrated.nodes).filter(([id]) => validIds.has(id)))
   return hydrated
 }
@@ -279,6 +378,17 @@ export function createStepDraft(index: number): SimpleStepDraft {
     stems: [],
     save: {},
     outputNames: {},
+  }
+}
+
+export function createEnsembleDraft(index: number): SimpleEnsembleDraft {
+  return {
+    id: `ensemble${index + 1}`,
+    inputs: [{ source: '', weight: 1 }, { source: '', weight: 1 }],
+    algorithm: 'avg_wave',
+    outputStem: 'Ensemble',
+    save: true,
+    outputName: '%filename%_%stem%_Ensemble',
   }
 }
 
@@ -372,10 +482,12 @@ type ModelEntryLike = {
   targetStem?: string
 }
 
-const SIMPLE_DEFINITION_FIELDS = new Set(['version', 'defaults', 'steps', 'studio'])
+const SIMPLE_DEFINITION_FIELDS = new Set(['version', 'defaults', 'steps', 'ensembles', 'studio'])
 const SIMPLE_DEFAULT_FIELDS = new Set(['device', 'output_format', 'inference_params'])
 const SIMPLE_INFERENCE_FIELDS = new Set(['normalize'])
 const SIMPLE_STEP_FIELDS = new Set(['id', 'model', 'input', 'stems', 'save', 'output_names'])
+const SIMPLE_ENSEMBLE_FIELDS = new Set(['id', 'inputs', 'algorithm', 'output_stem', 'save', 'output_name'])
+const SIMPLE_ENSEMBLE_INPUT_FIELDS = new Set(['source', 'weight'])
 
 function hasUnsupportedFields(value: Record<string, unknown>, allowed: Set<string>): boolean {
   return Object.keys(value).some(key => !allowed.has(key))
@@ -404,6 +516,22 @@ function usesAdvancedSimpleParameters(definition: Record<string, unknown>): bool
 
   const inference = isRecord(defaults.inference_params) ? defaults.inference_params : {}
   if (hasUnsupportedFields(inference, SIMPLE_INFERENCE_FIELDS)) return true
+
+  if (definition.ensembles != null && !Array.isArray(definition.ensembles)) return true
+  if (Array.isArray(definition.ensembles) && definition.ensembles.some((value) => {
+    if (!isRecord(value) || hasUnsupportedFields(value, SIMPLE_ENSEMBLE_FIELDS)) return true
+    if (!Array.isArray(value.inputs)) return true
+    if (value.inputs.some((input) => (
+      !isRecord(input)
+      || hasUnsupportedFields(input, SIMPLE_ENSEMBLE_INPUT_FIELDS)
+      || typeof input.source !== 'string'
+      || typeof input.weight !== 'number'
+      || !Number.isFinite(input.weight)
+    ))) return true
+    if (typeof value.id !== 'string' || typeof value.algorithm !== 'string' || typeof value.output_stem !== 'string') return true
+    if (value.save != null && value.save !== false && typeof value.save !== 'string') return true
+    return value.output_name != null && typeof value.output_name !== 'string'
+  })) return true
 
   return (definition.steps as unknown[]).some((value) => {
     if (!isRecord(value) || hasUnsupportedFields(value, SIMPLE_STEP_FIELDS)) return true

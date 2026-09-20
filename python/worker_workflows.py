@@ -224,14 +224,18 @@ def _prepare_simple_runtime_definition(definition: dict[str, Any]) -> dict[str, 
     save node; imported YAML without this metadata keeps its original behavior.
     """
     has_output_names = _simple_output_names(definition)
+    has_ensembles = isinstance(definition.get("ensembles"), list) and bool(definition.get("ensembles"))
     has_legacy_intermediate_policy = "save_intermediate" in definition
-    if not has_output_names and "studio" not in definition and not has_legacy_intermediate_policy:
+    if not has_output_names and not has_ensembles and "studio" not in definition and not has_legacy_intermediate_policy:
         return definition
     transient = json.loads(json.dumps(definition))
     # ``studio`` is editor-only metadata and is not part of pymss' YAML
     # schema. Keep it in the persisted Studio record, but never pass it to
     # the runtime parser.
     transient.pop("studio", None)
+    # ``ensembles`` is a Studio simple-workflow extension. The worker compiles
+    # it into DAG nodes after pymss has parsed the native linear YAML subset.
+    transient.pop("ensembles", None)
     # Saving is controlled solely by explicit save-node links. Older
     # definitions may still carry the retired global switch; ignore it.
     transient.pop("save_intermediate", None)
@@ -283,13 +287,35 @@ def _render_simple_filename(template: Any, *, input_path: str, stem: str, model:
     return f"{safe or stem or 'audio'}.{output_format}"
 
 
-def _apply_simple_output_names(dag: Any, definition: dict[str, Any], *, input_path: str,
-                               output_format: str, output_dir: Path | None = None) -> list[dict[str, str]]:
-    """Wire per-save filename constants into compiled YAML save nodes.
+def _reserve_simple_filename(filename: str, output_dir: Path | None,
+                             reserved_names: set[str]) -> str:
+    if output_dir is None:
+        reserved_names.add(filename.casefold())
+        return filename
+    candidate = Path(filename)
+    base = candidate.stem
+    suffix = candidate.suffix
+    for collision_index in range(1, 1000):
+        name = filename if collision_index == 1 else f"{base}_{collision_index}{suffix}"
+        if name.casefold() in reserved_names or (output_dir / name).exists():
+            continue
+        filename = name
+        break
+    reserved_names.add(filename.casefold())
+    return filename
 
-    The returned stem list follows the save-node insertion order. It lets the
-    worker keep the logical stem in result metadata even when a user-selected
-    filename no longer contains the stem name.
+
+def _apply_simple_output_names(dag: Any, definition: dict[str, Any], *, input_path: str,
+                               output_format: str, output_dir: Path | None = None,
+                               reserved_names: set[str] | None = None,
+                               start_index: int = 0,
+                               apply_names: bool = True) -> list[dict[str, str]]:
+    """Collect simple saves and optionally wire Studio filename constants.
+
+    Metadata always follows the compiler's save-node insertion order, including
+    native/legacy saves without ``output_names``. This preserves logical stems
+    for mixed separation + Ensemble workflows and reserves native root filenames
+    before Ensemble outputs choose their own collision-free names.
     """
     import pymss.graph as graph
 
@@ -301,8 +327,8 @@ def _apply_simple_output_names(dag: Any, definition: dict[str, Any], *, input_pa
          if link is not None and isinstance(link.link_id, int)),
         default=0,
     ) + 1
-    output_index = 0
-    reserved_names: set[str] = set()
+    output_index = start_index
+    reserved_names = reserved_names if reserved_names is not None else set()
     output_metadata: list[dict[str, str]] = []
     for step in steps:
         if not isinstance(step, dict):
@@ -310,7 +336,7 @@ def _apply_simple_output_names(dag: Any, definition: dict[str, Any], *, input_pa
         step_id = str(step.get("id") or "").strip()
         save = step.get("save")
         names = step.get("output_names")
-        if not step_id or not isinstance(save, dict) or not isinstance(names, dict):
+        if not step_id or not isinstance(save, dict):
             continue
         model = str(step.get("model") or "").strip()
         step_output_format = str(step.get("output_format") or output_format).strip().lower() or output_format
@@ -324,10 +350,25 @@ def _apply_simple_output_names(dag: Any, definition: dict[str, Any], *, input_pa
             save_node = next((node for node in dag.nodes if str(node.id) == node_id), None)
             if save_node is None:
                 continue
+            metadata = {"stem": stem_name, "filename": ""}
+            output_metadata.append(metadata)
+            output_index += 1
+            if not apply_names or not isinstance(names, dict):
+                if str(target or "").strip().lower() == "default":
+                    native_filename = _render_simple_filename(
+                        "%stem%",
+                        input_path=input_path,
+                        stem=stem_name,
+                        model=model,
+                        step_id=step_id,
+                        index=output_index,
+                        output_format=step_output_format,
+                    )
+                    _reserve_simple_filename(native_filename, output_dir, reserved_names)
+                continue
             hint = names.get(stem_name)
             if hint is None:
                 hint = next((value for key, value in names.items() if str(key).lower() == stem_name.lower()), None)
-            output_index += 1
             filename = _render_simple_filename(
                 hint,
                 input_path=input_path,
@@ -337,18 +378,8 @@ def _apply_simple_output_names(dag: Any, definition: dict[str, Any], *, input_pa
                 index=output_index,
                 output_format=step_output_format,
             )
-            if output_dir is not None:
-                candidate = Path(filename)
-                base = candidate.stem
-                suffix = candidate.suffix
-                for collision_index in range(1, 1000):
-                    name = filename if collision_index == 1 else f"{base}_{collision_index}{suffix}"
-                    if name.casefold() in reserved_names or (output_dir / name).exists():
-                        continue
-                    filename = name
-                    break
-                reserved_names.add(filename.casefold())
-            output_metadata.append({"stem": stem_name, "filename": filename})
+            filename = _reserve_simple_filename(filename, output_dir, reserved_names)
+            metadata["filename"] = filename
             # pymss graph sanitizer now natively supports Unicode filenames.
             # Use the target filename stem directly so files are created with
             # their intended names; _finalize_simple_output_paths acts as a no-op
@@ -378,6 +409,161 @@ def _apply_simple_output_names(dag: Any, definition: dict[str, Any], *, input_pa
                     data={"widgets_values": [filename_hint]},
                     title=constant_id,
                 ))
+    return output_metadata
+
+
+_SIMPLE_ENSEMBLE_ALGORITHMS = {
+    "avg_wave", "median_wave", "min_wave", "max_wave",
+    "avg_fft", "median_fft", "min_fft", "max_fft",
+}
+
+
+def _apply_simple_ensembles(dag: Any, definition: dict[str, Any], *, input_path: str,
+                            output_format: str, output_dir: Path | None = None,
+                            reserved_names: set[str] | None = None,
+                            start_index: int = 0) -> list[dict[str, str]]:
+    """Compile Studio simple-workflow Ensemble records into pymss DAG nodes."""
+    import pymss.graph as graph
+
+    raw_ensembles = definition.get("ensembles")
+    if not isinstance(raw_ensembles, list) or not raw_ensembles:
+        return []
+    steps = definition.get("steps")
+    if not isinstance(steps, list):
+        raise RuntimeError("Simple workflow steps are required for Ensemble")
+
+    produced: dict[str, tuple[str, int]] = {"input": ("input", 0)}
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        step_id = str(step.get("id") or "").strip()
+        stems = step.get("stems")
+        if not step_id or not isinstance(stems, list):
+            continue
+        for stem_index, stem in enumerate(stems):
+            stem_name = str(stem or "").strip()
+            if stem_name:
+                produced[f"{step_id}.{stem_name}".casefold()] = (f"step:{step_id}", stem_index * 2)
+
+    next_link_id = max(
+        (int(link.link_id) for node in dag.nodes for link in node.inputs
+         if link is not None and isinstance(link.link_id, int)),
+        default=0,
+    ) + 1
+    reserved_names = reserved_names if reserved_names is not None else set()
+    output_index = start_index
+    output_metadata: list[dict[str, str]] = []
+    used_ids = {str(node.id) for node in dag.nodes}
+
+    for ensemble_index, raw in enumerate(raw_ensembles, 1):
+        if not isinstance(raw, dict):
+            raise RuntimeError(f"Ensemble {ensemble_index} is invalid")
+        ensemble_id = str(raw.get("id") or f"ensemble{ensemble_index}").strip()
+        output_stem = str(raw.get("output_stem") or "").strip()
+        algorithm = str(raw.get("algorithm") or "avg_wave").strip()
+        raw_inputs = raw.get("inputs")
+        if not ensemble_id or not output_stem:
+            raise RuntimeError(f"Ensemble {ensemble_index} requires an id and output stem")
+        if algorithm not in _SIMPLE_ENSEMBLE_ALGORITHMS:
+            raise RuntimeError(f"Unsupported Ensemble algorithm: {algorithm}")
+        if not isinstance(raw_inputs, list) or not 2 <= len(raw_inputs) <= 10:
+            raise RuntimeError(f"Ensemble {ensemble_id} requires 2 to 10 inputs")
+
+        node_id = f"studio:ensemble:{ensemble_id}"
+        if node_id in used_ids:
+            raise RuntimeError(f"Duplicate Ensemble id: {ensemble_id}")
+        used_ids.add(node_id)
+        links: list[Any] = []
+        weights: list[float] = []
+        source_refs: set[str] = set()
+        for input_index, value in enumerate(raw_inputs):
+            if not isinstance(value, dict):
+                raise RuntimeError(f"Ensemble {ensemble_id} input {input_index + 1} is invalid")
+            source_ref = str(value.get("source") or "").strip()
+            produced_source = produced.get(source_ref.casefold())
+            if produced_source is None:
+                raise RuntimeError(f"Ensemble {ensemble_id} references unknown output: {source_ref}")
+            if source_ref.casefold() in source_refs:
+                raise RuntimeError(f"Ensemble {ensemble_id} uses the same output more than once: {source_ref}")
+            source_refs.add(source_ref.casefold())
+            try:
+                weight = float(value.get("weight", 1))
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError(f"Ensemble {ensemble_id} input weight is invalid") from exc
+            if weight <= 0:
+                raise RuntimeError(f"Ensemble {ensemble_id} input weight must be greater than zero")
+            weights.append(weight)
+            source_node_id, source_slot = produced_source
+            links.append(graph.DAGLink(
+                link_id=next_link_id,
+                source_node_id=source_node_id,
+                source_slot=source_slot,
+                target_node_id=node_id,
+                target_slot=input_index,
+                type=graph.AUDIO,
+            ))
+            next_link_id += 1
+
+        dag.nodes.append(graph.DAGNode(
+            id=node_id,
+            type="pymss_audio_ensemble",
+            inputs=links,
+            data={"widgets_values": [len(links), algorithm, *weights]},
+            title=ensemble_id,
+        ))
+
+        save_target = raw.get("save")
+        if save_target in (None, False, ""):
+            continue
+        save_id = f"studio:ensemble-save:{ensemble_id}"
+        audio_link = graph.DAGLink(
+            link_id=next_link_id,
+            source_node_id=node_id,
+            source_slot=0,
+            target_node_id=save_id,
+            target_slot=0,
+            type=graph.AUDIO,
+        )
+        next_link_id += 1
+        save_inputs: list[Any] = [audio_link, None, None, None, None, None, None, None]
+
+        output_index += 1
+        filename = _render_simple_filename(
+            raw.get("output_name"),
+            input_path=input_path,
+            stem=output_stem,
+            model="Ensemble",
+            step_id=ensemble_id,
+            index=output_index,
+            output_format=output_format,
+        )
+        filename = _reserve_simple_filename(filename, output_dir, reserved_names)
+        output_metadata.append({"stem": output_stem, "filename": filename})
+        constant_id = f"studio:ensemble-filename:{ensemble_id}"
+        save_inputs[1] = graph.DAGLink(
+            link_id=next_link_id,
+            source_node_id=constant_id,
+            source_slot=0,
+            target_node_id=save_id,
+            target_slot=1,
+            type=graph.STRING,
+        )
+        next_link_id += 1
+        dag.nodes.append(graph.DAGNode(
+            id=constant_id,
+            type="StringConstant",
+            inputs=[],
+            data={"widgets_values": [Path(filename).stem]},
+            title=constant_id,
+        ))
+        dag.nodes.append(graph.DAGNode(
+            id=save_id,
+            type="pymss_save_audio",
+            inputs=save_inputs,
+            data={"widgets_values": [output_format, "Default", "44100", "FLOAT", "PCM_24", "320k"]},
+            title=save_id,
+        ))
+
     return output_metadata
 
 
@@ -486,6 +672,7 @@ def _run_pymss(payload: dict[str, Any], task_id: str, input_path: str | None,
     runtime_payload, runtime_inputs = _prepare_legacy_global_input(payload, input_path, inputs)
     primary = input_path or (list(runtime_inputs.values())[0] if runtime_inputs else "")
     workflow_definition = runtime_payload.get("workflow")
+    simple_definition = workflow_definition if isinstance(workflow_definition, dict) and "steps" in workflow_definition else None
     ensemble_stem = _ensemble_output_stem(workflow_definition)
     started_at = datetime.now()
     if isinstance(workflow_definition, dict) and "steps" in workflow_definition:
@@ -513,14 +700,26 @@ def _run_pymss(payload: dict[str, Any], task_id: str, input_path: str | None,
                 output_format = str(defaults.get("output_format") or output_format).strip().lower() or output_format
         wf = pwf.load_workflow_data(data)
         dag = graph.compile_workflow_to_dag(wf)
-        if _simple_output_names(data):
-            simple_output_metadata = _apply_simple_output_names(
+        reserved_simple_names: set[str] = set()
+        simple_output_metadata = _apply_simple_output_names(
+            dag,
+            data,
+            input_path=primary,
+            output_format=output_format,
+            output_dir=task_output_dir,
+            reserved_names=reserved_simple_names,
+            apply_names=_simple_output_names(data),
+        )
+        if simple_definition is not None:
+            simple_output_metadata.extend(_apply_simple_ensembles(
                 dag,
-                data,
+                simple_definition,
                 input_path=primary,
                 output_format=output_format,
                 output_dir=task_output_dir,
-            )
+                reserved_names=reserved_simple_names,
+                start_index=len(simple_output_metadata),
+            ))
     else:
         dag = graph.load_comfy_file(workflow_path)
 

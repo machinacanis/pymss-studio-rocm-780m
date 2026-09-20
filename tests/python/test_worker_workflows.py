@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import ModuleType, SimpleNamespace
 import tempfile
 import unittest
+from unittest.mock import patch
 
 if __package__:
     from . import _bootstrap as _worker_test_bootstrap
@@ -10,6 +12,8 @@ else:
     import _bootstrap as _worker_test_bootstrap
 
 from worker_workflows import (
+    _apply_simple_ensembles,
+    _apply_simple_output_names,
     _prepare_legacy_global_input,
     _prepare_simple_runtime_definition,
     _finalize_simple_output_paths,
@@ -121,6 +125,103 @@ class WorkflowOutputMetadataTests(unittest.TestCase):
         self.assertNotIn("studio", runtime)
         self.assertIn("studio", definition)
         self.assertIsNot(runtime, definition)
+
+    def test_ensemble_metadata_is_removed_before_pymss_yaml_parsing(self) -> None:
+        definition = {
+            "version": 1,
+            "steps": [{"id": "split", "save": {}}],
+            "ensembles": [{
+                "id": "blend",
+                "inputs": [{"source": "split.vocals", "weight": 1}, {"source": "split.music", "weight": 1}],
+                "algorithm": "avg_wave",
+                "output_stem": "Vocals",
+                "save": "Default",
+            }],
+        }
+        runtime = _prepare_simple_runtime_definition(definition)
+        self.assertNotIn("ensembles", runtime)
+        self.assertIn("ensembles", definition)
+        self.assertIsNot(runtime, definition)
+
+    def test_simple_ensemble_records_compile_to_graph_nodes_and_output_metadata(self) -> None:
+        class DAGLink:
+            def __init__(self, **values):
+                self.__dict__.update(values)
+
+        class DAGNode:
+            def __init__(self, *, id, type, inputs, data, title=""):
+                self.id = id
+                self.type = type
+                self.inputs = inputs
+                self.data = data
+                self.title = title
+
+        graph_module = ModuleType("pymss.graph")
+        graph_module.DAGLink = DAGLink
+        graph_module.DAGNode = DAGNode
+        graph_module.AUDIO = "AUDIO"
+        graph_module.STRING = "STRING"
+        pymss_module = ModuleType("pymss")
+        pymss_module.graph = graph_module
+        dag = SimpleNamespace(nodes=[
+            DAGNode(id="input", type="input_audio", inputs=[], data={}),
+            DAGNode(id="step:modelA", type="mss_separate", inputs=[], data={}),
+            DAGNode(id="step:modelB", type="mss_separate", inputs=[], data={}),
+            DAGNode(id="save:modelA:Vocals", type="pymss_save_audio", inputs=[None, None], data={}),
+        ])
+        definition = {
+            "steps": [
+                {"id": "modelA", "model": "a.ckpt", "stems": ["Vocals"], "save": {"Vocals": "Default"}},
+                {"id": "modelB", "stems": ["Drums", "Vocals"]},
+            ],
+            "ensembles": [{
+                "id": "blend",
+                "inputs": [
+                    {"source": "input", "weight": 1},
+                    {"source": "modelB.Vocals", "weight": 0.75},
+                ],
+                "algorithm": "avg_fft",
+                "output_stem": "Vocals",
+                "save": "Default",
+                "output_name": "%stem%",
+            }],
+        }
+
+        with tempfile.TemporaryDirectory() as directory:
+            reserved_names = set()
+            with patch.dict("sys.modules", {"pymss": pymss_module, "pymss.graph": graph_module}):
+                step_metadata = _apply_simple_output_names(
+                    dag,
+                    definition,
+                    input_path="D:/Audio/song.wav",
+                    output_format="flac",
+                    output_dir=Path(directory),
+                    reserved_names=reserved_names,
+                    apply_names=False,
+                )
+                ensemble_metadata = _apply_simple_ensembles(
+                    dag,
+                    definition,
+                    input_path="D:/Audio/song.wav",
+                    output_format="flac",
+                    output_dir=Path(directory),
+                    reserved_names=reserved_names,
+                    start_index=len(step_metadata),
+                )
+
+        ensemble = next(node for node in dag.nodes if node.type == "pymss_audio_ensemble")
+        save = next(node for node in dag.nodes if node.id == "studio:ensemble-save:blend")
+        filename = next(node for node in dag.nodes if node.type == "StringConstant")
+        self.assertEqual(ensemble.data["widgets_values"], [2, "avg_fft", 1.0, 0.75])
+        self.assertEqual(
+            [(link.source_node_id, link.source_slot, link.target_slot) for link in ensemble.inputs],
+            [("input", 0, 0), ("step:modelB", 2, 1)],
+        )
+        self.assertEqual(save.inputs[0].source_node_id, ensemble.id)
+        self.assertEqual(save.inputs[1].source_node_id, filename.id)
+        self.assertEqual(filename.data["widgets_values"], ["Vocals_2"])
+        self.assertEqual(step_metadata, [{"stem": "Vocals", "filename": ""}])
+        self.assertEqual(ensemble_metadata, [{"stem": "Vocals", "filename": "Vocals_2.flac"}])
 
     def test_intermediate_outputs_follow_explicit_save_links(self) -> None:
         definition = {

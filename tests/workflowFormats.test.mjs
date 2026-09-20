@@ -45,6 +45,7 @@ const {
   cleanupSimpleDraft,
   connectSimple,
   disconnectSimple,
+  simpleEnsembleInputTarget,
   simpleOutputRef,
   simpleSaveTarget,
   simpleStepInputTarget,
@@ -341,6 +342,58 @@ test('simple node editor keeps unselected stems available for downstream steps',
   assert.equal(draft.steps[1].input, 'step1.vocals')
   assert.deepEqual(draft.steps[0].save, { music: 'Default' })
   assert.equal(canConnectSimple(draft, simpleOutputRef('step1', 'vocals'), 'save').ok, true)
+})
+
+test('simple editor round-trips Ensemble nodes and validates their connections', () => {
+  const definition = {
+    version: 1,
+    defaults: { device: 'cuda', output_format: 'wav', inference_params: { normalize: false } },
+    steps: [
+      { id: 'modelA', model: 'a.ckpt', input: 'input', stems: ['Vocals'], save: {}, output_names: {} },
+      { id: 'modelB', model: 'b.ckpt', input: 'input', stems: ['Vocals'], save: {}, output_names: {} },
+    ],
+    ensembles: [{
+      id: 'blend',
+      inputs: [
+        { source: 'input', weight: 1 },
+        { source: 'modelB.Vocals', weight: 0.75 },
+      ],
+      algorithm: 'avg_fft',
+      output_stem: 'Vocals',
+      save: 'Default',
+      output_name: '%filename%_%stem%_Ensemble',
+    }],
+  }
+
+  const draft = hydrateSimpleWorkflow(definition)
+  assert.equal(draft.ensembles.length, 1)
+  assert.equal(draft.ensembles[0].algorithm, 'avg_fft')
+  assert.equal(draft.ensembles[0].inputs[1].weight, 0.75)
+  assert.equal(canConnectSimple(draft, 'input', simpleEnsembleInputTarget('blend', 0)).ok, true)
+  assert.deepEqual(
+    canConnectSimple(draft, 'input', simpleEnsembleInputTarget('blend', 1)),
+    { ok: false, reason: 'duplicate-source' },
+  )
+  assert.equal(canConnectSimple(draft, 'blend.Vocals', 'save').ok, true)
+  assert.equal(canConnectSimple(draft, 'blend.Vocals', simpleStepInputTarget('modelB')).ok, false)
+  assert.equal(countWorkflowSaveOutputs(definition), 1)
+  assert.deepEqual(analyzeSimpleWorkflow(definition), { editable: true, reasonCodes: [] })
+
+  const invalidAlgorithm = structuredClone(definition)
+  invalidAlgorithm.ensembles[0].algorithm = 'unknown'
+  assert.equal(getWorkflowDefinitionIssue(invalidAlgorithm), 'invalid-definition')
+  const missingSource = structuredClone(definition)
+  missingSource.ensembles[0].inputs[1].source = 'missing.Vocals'
+  assert.equal(getWorkflowDefinitionIssue(missingSource), 'invalid-definition')
+
+  const rebuilt = buildSimpleWorkflowDefinition(draft)
+  assert.deepEqual(rebuilt.ensembles, definition.ensembles)
+  assert.equal(rebuilt.studio.nodes.blend.x, draft.ui.nodes.blend.x)
+
+  draft.steps.splice(0, 1)
+  cleanupSimpleDraft(draft)
+  assert.equal(draft.ensembles[0].inputs[0].source, 'input')
+  assert.equal(draft.ensembles[0].inputs[1].source, 'modelB.Vocals')
 })
 
 test('simple runtime preparation materializes defaults without mutating the stored workflow', () => {

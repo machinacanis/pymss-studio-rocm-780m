@@ -2,6 +2,11 @@ export type WorkflowFormat = 'simple' | 'graph' | 'unknown'
 
 export const WORKFLOW_FORMAT_VERSION = 1
 
+const SIMPLE_ENSEMBLE_ALGORITHMS = new Set([
+  'avg_wave', 'median_wave', 'min_wave', 'max_wave',
+  'avg_fft', 'median_fft', 'min_fft', 'max_fft',
+])
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
 }
@@ -38,6 +43,7 @@ export function isGraphWorkflowDefinition(definition: unknown): definition is Re
  */
 export function hasInvalidSimpleStructure(definition: Record<string, unknown>): boolean {
   if (!Array.isArray(definition.steps)) return true
+  if (definition.ensembles != null && !Array.isArray(definition.ensembles)) return true
   if (definition.studio != null && !isRecord(definition.studio)) return true
   if (isRecord(definition.studio)) {
     if (definition.studio.editor !== 'simple') return true
@@ -54,6 +60,46 @@ export function hasInvalidSimpleStructure(definition: Record<string, unknown>): 
     return false
   })
   if (hasInvalidStep) return true
+  const ensembles = Array.isArray(definition.ensembles) ? definition.ensembles : []
+  const hasInvalidEnsemble = ensembles.some((value) => {
+    if (!isRecord(value) || !Array.isArray(value.inputs)) return true
+    if (typeof value.id !== 'string' || !value.id.trim()) return true
+    if (typeof value.algorithm !== 'string' || !SIMPLE_ENSEMBLE_ALGORITHMS.has(value.algorithm)) return true
+    if (typeof value.output_stem !== 'string' || !value.output_stem.trim()) return true
+    if (value.save != null && value.save !== false && typeof value.save !== 'string') return true
+    if (value.output_name != null && typeof value.output_name !== 'string') return true
+    if (value.inputs.length < 2 || value.inputs.length > 10) return true
+    return value.inputs.some((input) => (
+      !isRecord(input)
+      || typeof input.source !== 'string'
+      || !input.source.trim()
+      || typeof input.weight !== 'number'
+      || !Number.isFinite(input.weight)
+      || input.weight <= 0
+    ))
+  })
+  if (hasInvalidEnsemble) return true
+  const availableOutputs = new Set(['input', ...(definition.steps as unknown[]).flatMap((value) => {
+    if (!isRecord(value) || typeof value.id !== 'string' || !Array.isArray(value.stems)) return []
+    const stepId = value.id.trim()
+    return value.stems
+      .filter(stem => typeof stem === 'string' && stem.trim())
+      .map(stem => `${stepId}.${String(stem).trim()}`.toLowerCase())
+  })])
+  if (ensembles.some((value) => {
+    if (!isRecord(value) || !Array.isArray(value.inputs)) return true
+    const sources = value.inputs.map(input => isRecord(input) && typeof input.source === 'string'
+      ? input.source.trim().toLowerCase()
+      : '')
+    return sources.some(source => !availableOutputs.has(source)) || new Set(sources).size !== sources.length
+  })) return true
+  const ids = [
+    ...(definition.steps as unknown[]).flatMap(value => isRecord(value) && typeof value.id === 'string' ? [value.id.trim()] : []),
+    ...ensembles.flatMap(value => isRecord(value) && typeof value.id === 'string' ? [value.id.trim()] : []),
+  ].filter(Boolean)
+  if (ids.some(id => id.includes('.'))) return true
+  const normalizedIds = ids.map(id => id.toLowerCase())
+  if (new Set(normalizedIds).size !== normalizedIds.length) return true
   // The pymss YAML parser accepts exactly version 1. Rejecting unsupported
   // versions here prevents the simple editor from rewriting a newer schema
   // as version 1 on save and gives the run screen a deterministic error.

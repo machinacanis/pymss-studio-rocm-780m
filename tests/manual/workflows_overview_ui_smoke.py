@@ -81,7 +81,7 @@ with sync_playwright() as playwright:
     expect(page.locator(".wf-list-group__head", has_text="Simple workflows")).to_be_visible()
     expect(page.locator(".wf-list-group__head", has_text="Advanced workflows")).to_be_visible()
     expect(page.locator(".wf-row--simple")).to_contain_text("Simple")
-    expect(page.locator(".wf-row--simple")).to_contain_text("Steps 1 · Outputs 2")
+    expect(page.locator(".wf-row--simple")).to_contain_text("Steps 1 · Ensembles 0 · Outputs 2")
     expect(page.locator(".wf-row--advanced")).to_contain_text("Advanced")
     expect(page.locator(".wf-row--advanced")).to_contain_text("Nodes 4 · Outputs 1")
 
@@ -95,12 +95,12 @@ with sync_playwright() as playwright:
     expect(page.locator(".wf-row--simple")).to_be_visible()
     expect(page.locator(".wf-row--advanced")).to_have_count(0)
     expect(page.locator(".wf-kind-badge--simple")).to_have_text("Simple")
-    expect(page.locator(".wf-metrics--three .wf-metric")).to_have_count(3)
+    expect(page.locator(".wf-metrics .wf-metric")).to_have_count(4)
     expect(page.get_by_role("button", name="Edit steps", exact=True)).to_be_visible()
 
     page.locator(".wf-type-filter button", has_text="All").click()
     page.locator(".wf-row--advanced").click()
     page.screenshot(path="data/outputs/workflows-overview-redesign.png", full_page=True)
-    print(json.dumps({"groups": 2, "filters": 3, "simpleMetrics": 3}))
+    print(json.dumps({"groups": 2, "filters": 3, "simpleMetrics": 4}))
     print("workflows overview UI smoke passed")
     browser.close()

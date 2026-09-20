@@ -78,7 +78,7 @@ export function getWorkflowDefinitionIssue(
 export function countWorkflowSaveOutputs(definition: Record<string, unknown>): number {
   const format = detectWorkflowFormat(definition)
   if (format === 'simple') {
-    return (definition.steps as unknown[]).reduce<number>((total, value) => {
+    const stepOutputs = (definition.steps as unknown[]).reduce<number>((total, value) => {
       if (!isRecord(value) || !isRecord(value.save)) return total
       // pymss skips false/null/empty save targets. Count only entries that
       // produce at least one directory so the validation state matches the
@@ -91,6 +91,15 @@ export function countWorkflowSaveOutputs(definition: Record<string, unknown>): n
       }).length
       return total + outputCount
     }, 0)
+    const ensembleOutputs = (Array.isArray(definition.ensembles) ? definition.ensembles : [])
+      .filter(value => (
+        isRecord(value)
+        && value.save !== false
+        && value.save !== null
+        && value.save !== undefined
+        && Boolean(String(value.save).trim())
+      )).length
+    return stepOutputs + ensembleOutputs
   }
   if (format === 'graph') {
     return (definition.nodes as unknown[]).filter(value => (

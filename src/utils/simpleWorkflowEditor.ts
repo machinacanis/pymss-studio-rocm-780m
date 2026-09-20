@@ -1,11 +1,20 @@
-import type { SimpleDraft } from '@/utils/workflowSimple'
+import {
+  SIMPLE_ENSEMBLE_ALGORITHMS,
+  type SimpleDraft,
+  type SimpleEnsembleDraft,
+  type SimpleStepDraft,
+} from '@/utils/workflowSimple'
 
 export type SimpleConnectionSource = 'input' | `${string}.${string}`
-export type SimpleConnectionTarget = `step:${string}` | `save` | `save:${string}.${string}`
+export type SimpleConnectionTarget =
+  | `step:${string}`
+  | `ensemble:${string}:${number}`
+  | `save`
+  | `save:${string}.${string}`
 
 export type SimpleConnectionCheck =
   | { ok: true }
-  | { ok: false; reason: 'missing-source' | 'missing-target' | 'invalid-source' | 'forward-link' | 'self-link' | 'invalid-save-target' }
+  | { ok: false; reason: 'missing-source' | 'missing-target' | 'invalid-source' | 'forward-link' | 'self-link' | 'duplicate-source' | 'invalid-save-target' }
 
 export function simpleStepInputTarget(stepId: string): `step:${string}` {
   return `step:${stepId}`
@@ -15,27 +24,50 @@ export function simpleSaveTarget(stepId: string, stem: string): `save:${string}.
   return `save:${stepId}.${stem}`
 }
 
+export function simpleEnsembleInputTarget(ensembleId: string, index: number): `ensemble:${string}:${number}` {
+  return `ensemble:${ensembleId}:${index}`
+}
+
 export function simpleOutputRef(stepId: string, stem: string): `${string}.${string}` {
   return `${stepId}.${stem}`
 }
 
 export function simpleSourceStepId(source: string): string {
-  const separator = source.lastIndexOf('.')
+  const separator = source.indexOf('.')
   return separator > 0 ? source.slice(0, separator) : ''
 }
 
 export function simpleSourceStem(source: string): string {
-  const separator = source.lastIndexOf('.')
+  const separator = source.indexOf('.')
   return separator > 0 ? source.slice(separator + 1) : ''
 }
 
-function stepAndStem(draft: SimpleDraft, source: string) {
+type ResolvedSimpleSource =
+  | { kind: 'step'; step: SimpleStepDraft; stem: string }
+  | { kind: 'ensemble'; ensemble: SimpleEnsembleDraft; stem: string }
+
+function resolveSource(draft: SimpleDraft, source: string): ResolvedSimpleSource | null {
   if (source === 'input') return null
-  const stepId = simpleSourceStepId(source)
+  const sourceId = simpleSourceStepId(source)
   const stem = simpleSourceStem(source)
-  const step = draft.steps.find(item => item.id === stepId)
-  return step && stem && step.stems.some(item => item.toLowerCase() === stem.toLowerCase())
-    ? { step, stem }
+  const step = draft.steps.find(item => item.id === sourceId)
+  if (step && stem && step.stems.some(item => item.toLowerCase() === stem.toLowerCase())) {
+    return { kind: 'step', step, stem }
+  }
+  const ensemble = draft.ensembles.find(item => item.id === sourceId)
+  if (ensemble && stem && ensemble.outputStem.trim().toLowerCase() === stem.toLowerCase()) {
+    return { kind: 'ensemble', ensemble, stem: ensemble.outputStem.trim() }
+  }
+  return null
+}
+
+function ensembleTarget(draft: SimpleDraft, target: string) {
+  const match = /^ensemble:(.+):(\d+)$/.exec(target)
+  if (!match) return null
+  const ensemble = draft.ensembles.find(item => item.id === match[1])
+  const index = Number(match[2])
+  return ensemble && Number.isInteger(index) && index >= 0 && index < ensemble.inputs.length
+    ? { ensemble, index }
     : null
 }
 
@@ -46,7 +78,8 @@ export function canConnectSimple(
 ): SimpleConnectionCheck {
   const rawSource = source.trim()
   if (!rawSource) return { ok: false, reason: 'missing-source' }
-  if (rawSource !== 'input' && !stepAndStem(draft, rawSource)) return { ok: false, reason: 'invalid-source' }
+  const sourceValue = rawSource === 'input' ? null : resolveSource(draft, rawSource)
+  if (rawSource !== 'input' && !sourceValue) return { ok: false, reason: 'invalid-source' }
 
   if (target === 'step:') return { ok: false, reason: 'missing-target' }
   if (target.startsWith('step:')) {
@@ -54,6 +87,7 @@ export function canConnectSimple(
     const targetIndex = draft.steps.findIndex(step => step.id === targetId)
     if (targetIndex < 0) return { ok: false, reason: 'missing-target' }
     if (rawSource === 'input') return { ok: true }
+    if (sourceValue?.kind !== 'step') return { ok: false, reason: 'invalid-source' }
     const sourceId = simpleSourceStepId(rawSource)
     const sourceIndex = draft.steps.findIndex(step => step.id === sourceId)
     if (sourceIndex < 0) return { ok: false, reason: 'invalid-source' }
@@ -62,19 +96,25 @@ export function canConnectSimple(
     return { ok: true }
   }
 
+  if (target.startsWith('ensemble:')) {
+    const resolvedTarget = ensembleTarget(draft, target)
+    if (!resolvedTarget) return { ok: false, reason: 'missing-target' }
+    if (rawSource !== 'input' && sourceValue?.kind !== 'step') return { ok: false, reason: 'invalid-source' }
+    if (resolvedTarget.ensemble.inputs.some((input, index) => index !== resolvedTarget.index && input.source.toLowerCase() === rawSource.toLowerCase())) {
+      return { ok: false, reason: 'duplicate-source' }
+    }
+    return { ok: true }
+  }
+
   if (target === 'save') {
     if (rawSource === 'input') return { ok: false, reason: 'invalid-save-target' }
-    const sourceValue = stepAndStem(draft, rawSource)
     if (!sourceValue) return { ok: false, reason: 'invalid-save-target' }
     return { ok: true }
   }
   if (!target.startsWith('save:')) return { ok: false, reason: 'missing-target' }
   if (rawSource === 'input') return { ok: false, reason: 'invalid-save-target' }
   const value = target.slice('save:'.length)
-  const targetStepId = simpleSourceStepId(value)
-  const targetStem = simpleSourceStem(value)
-  const sourceValue = stepAndStem(draft, rawSource)
-  if (!sourceValue || targetStepId !== simpleSourceStepId(rawSource) || targetStem.toLowerCase() !== sourceValue.stem.toLowerCase()) {
+  if (!sourceValue || value.toLowerCase() !== rawSource.toLowerCase()) {
     return { ok: false, reason: 'invalid-save-target' }
   }
   return { ok: true }
@@ -92,13 +132,24 @@ export function connectSimple(
     if (step) step.input = source.trim()
     return check
   }
+  if (target.startsWith('ensemble:')) {
+    const resolvedTarget = ensembleTarget(draft, target)
+    if (resolvedTarget) resolvedTarget.ensemble.inputs[resolvedTarget.index].source = source.trim()
+    return check
+  }
   const value = target === 'save' ? source.trim() : target.slice('save:'.length)
-  const stepId = simpleSourceStepId(value)
+  const sourceId = simpleSourceStepId(value)
   const stem = simpleSourceStem(value)
-  const step = draft.steps.find(item => item.id === stepId)
+  const step = draft.steps.find(item => item.id === sourceId)
   if (step) {
     step.save = { ...step.save, [stem]: step.save[stem] || 'Default' }
     step.outputNames = { ...step.outputNames, [stem]: step.outputNames[stem] || '%filename%_%stem%_%model%' }
+    return check
+  }
+  const ensemble = draft.ensembles.find(item => item.id === sourceId)
+  if (ensemble && ensemble.outputStem.trim().toLowerCase() === stem.toLowerCase()) {
+    ensemble.save = true
+    if (!ensemble.outputName.trim()) ensemble.outputName = '%filename%_%stem%_Ensemble'
   }
   return check
 }
@@ -110,18 +161,31 @@ export function disconnectSimple(draft: SimpleDraft, target: SimpleConnectionTar
     step.input = ''
     return true
   }
+  if (target.startsWith('ensemble:')) {
+    const resolvedTarget = ensembleTarget(draft, target)
+    if (!resolvedTarget) return false
+    resolvedTarget.ensemble.inputs[resolvedTarget.index].source = ''
+    return true
+  }
   if (!target.startsWith('save:')) return false
   const value = target.slice('save:'.length)
-  const step = draft.steps.find(item => item.id === simpleSourceStepId(value))
+  const sourceId = simpleSourceStepId(value)
+  const step = draft.steps.find(item => item.id === sourceId)
   const stem = simpleSourceStem(value)
-  if (!step || !stem || !(stem in step.save)) return false
-  const nextSave = { ...step.save }
-  delete nextSave[stem]
-  step.save = nextSave
+  if (step && stem && stem in step.save) {
+    const nextSave = { ...step.save }
+    delete nextSave[stem]
+    step.save = nextSave
+    return true
+  }
+  const ensemble = draft.ensembles.find(item => item.id === sourceId)
+  if (!ensemble || !ensemble.save || ensemble.outputStem.trim().toLowerCase() !== stem.toLowerCase()) return false
+  ensemble.save = false
   return true
 }
 
 export function cleanupSimpleDraft(draft: SimpleDraft): void {
+  if (!Array.isArray(draft.ensembles)) draft.ensembles = []
   const stepIndexes = new Map(draft.steps.map((step, index) => [step.id, index]))
   draft.steps.forEach((step, index) => {
     const input = step.input.trim()
@@ -149,5 +213,24 @@ export function cleanupSimpleDraft(draft: SimpleDraft): void {
       if (value?.trim()) nextNames[stem] = value
     })
     step.outputNames = nextNames
+  })
+  draft.ensembles.forEach((ensemble) => {
+    if (!SIMPLE_ENSEMBLE_ALGORITHMS.includes(ensemble.algorithm)) ensemble.algorithm = 'avg_wave'
+    ensemble.outputStem = ensemble.outputStem.trim()
+    ensemble.outputName = ensemble.outputName.trim() || '%filename%_%stem%_Ensemble'
+    const seen = new Set<string>()
+    ensemble.inputs = ensemble.inputs.slice(0, 10).map((input) => {
+      const source = input.source.trim()
+      const resolved = resolveSource(draft, source)
+      const sourceKey = source.toLowerCase()
+      const validSource = source === 'input' || resolved?.kind === 'step'
+      const valid = validSource && !seen.has(sourceKey)
+      if (valid) seen.add(sourceKey)
+      return {
+        source: valid ? source : '',
+        weight: Number.isFinite(input.weight) && input.weight > 0 ? input.weight : 1,
+      }
+    })
+    while (ensemble.inputs.length < 2) ensemble.inputs.push({ source: '', weight: 1 })
   })
 }

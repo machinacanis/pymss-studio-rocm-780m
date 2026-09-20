@@ -86,6 +86,8 @@ struct ActiveRuntimeRecord {
     python_path: String,
     backend: Option<String>,
     source: Option<String>,
+    #[serde(default)]
+    debug_override: bool,
 }
 
 fn worker_path(app: &AppHandle) -> AppResult<PathBuf> {
@@ -249,7 +251,13 @@ fn distinct_bundled_runtime_env(
 fn active_runtime_python_path(app: &AppHandle) -> AppResult<Option<String>> {
     let user_file = storage::active_runtime_file(app)?;
     if let Some((path, _source)) = resolve_active_runtime_record(&user_file) {
-        if is_user_runtime_python_path(app, &path)? && active_path_backend_matches(&user_file, &path) {
+        let is_managed = is_user_runtime_python_path(app, &path)?;
+        let is_debug_override = active_debug_override_path_allowed(
+            &user_file,
+            &path,
+            storage::is_development_executable(),
+        );
+        if (is_managed || is_debug_override) && active_path_backend_matches(&user_file, &path) {
             return Ok(Some(path));
         }
     };
@@ -316,6 +324,19 @@ fn active_path_backend_matches(file: &Path, python_path: &str) -> bool {
         .and_then(|env| env.file_name())
         .and_then(|name| name.to_str())
         .is_some_and(|name| name.eq_ignore_ascii_case(backend.trim()))
+}
+
+fn active_debug_override_path_allowed(file: &Path, python_path: &str, development_executable: bool) -> bool {
+    if !development_executable {
+        return false;
+    }
+    let Ok(content) = std::fs::read_to_string(file) else {
+        return false;
+    };
+    let Ok(record) = serde_json::from_str::<ActiveRuntimeRecord>(&content) else {
+        return false;
+    };
+    record.debug_override && active_path_backend_matches(file, python_path)
 }
 
 fn is_user_runtime_python_path(app: &AppHandle, path: &str) -> AppResult<bool> {
@@ -520,6 +541,9 @@ fn build_worker_command(
     }
     if let Ok(file) = storage::active_runtime_file(app) {
         cmd.env("PYMSS_STUDIO_ACTIVE_RUNTIME_FILE", file.to_string_lossy().to_string());
+    }
+    if storage::is_development_executable() {
+        cmd.env("PYMSS_STUDIO_ALLOW_DEBUG_RUNTIME_OVERRIDE", "1");
     }
     if let Some(dir) = bundled_runtime_envs_dir(app)? {
         cmd.env("PYMSS_STUDIO_BUNDLED_RUNTIME_ENVS_DIR", dir.to_string_lossy().to_string());
@@ -1600,6 +1624,43 @@ mod tests {
         )
         .unwrap();
         assert!(!super::active_path_backend_matches(&active, &python.to_string_lossy()));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn external_runtime_pointer_requires_a_development_debug_override() {
+        let root = temp_root("external-debug-runtime");
+        let active = root.join("active-runtime.json");
+        let python = root.join("external").join("cuda").join("bin").join("python");
+        fs::create_dir_all(python.parent().unwrap()).unwrap();
+        fs::write(&python, "stub").unwrap();
+        let python = fs::canonicalize(python).unwrap();
+
+        fs::write(
+            &active,
+            serde_json::to_vec(&json!({
+                "backend": "cuda",
+                "pythonPath": python.to_string_lossy(),
+                "debugOverride": true,
+            })).unwrap(),
+        ).unwrap();
+        assert!(super::active_debug_override_path_allowed(
+            &active, &python.to_string_lossy(), true,
+        ));
+        assert!(!super::active_debug_override_path_allowed(
+            &active, &python.to_string_lossy(), false,
+        ));
+
+        fs::write(
+            &active,
+            serde_json::to_vec(&json!({
+                "backend": "cuda",
+                "pythonPath": python.to_string_lossy(),
+            })).unwrap(),
+        ).unwrap();
+        assert!(!super::active_debug_override_path_allowed(
+            &active, &python.to_string_lossy(), true,
+        ));
         let _ = fs::remove_dir_all(root);
     }
 

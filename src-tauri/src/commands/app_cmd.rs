@@ -789,22 +789,46 @@ pub async fn debug_runtime_restore_file(app: AppHandle, payload: DebugRuntimeRes
     debug_runtime_pointers(app).await
 }
 
-#[tauri::command]
-pub async fn debug_runtime_override_active(app: AppHandle, payload: DebugActiveRuntimeOverrideRequest) -> AppResult<DebugRuntimePointersPayload> {
-    require_runtime_debug_developer_mode(&app)?;
-    let backend = payload.backend.trim().to_lowercase();
-    let python_path = payload.python_path.trim().to_string();
+fn validate_debug_runtime_override(backend: &str, python_path: &str) -> AppResult<(String, String)> {
+    let backend = backend.trim().to_lowercase();
     if !matches!(backend.as_str(), "cpu" | "cuda" | "rocm" | "mlx") {
         return Err(AppError::Worker("runtime debug backend is unsupported".into()));
     }
+    let python_path = python_path.trim();
     if python_path.is_empty() {
         return Err(AppError::Worker("runtime debug python path is required".into()));
     }
+    let python = PathBuf::from(python_path);
+    if !python.is_absolute() {
+        return Err(AppError::Worker("runtime debug python path must be absolute".into()));
+    }
+    let python = python
+        .canonicalize()
+        .map_err(|_| AppError::Worker("runtime debug python path does not exist".into()))?;
+    if !python.is_file() {
+        return Err(AppError::Worker("runtime debug python path is not a file".into()));
+    }
+    let path_backend = python
+        .parent()
+        .and_then(Path::parent)
+        .and_then(Path::file_name)
+        .and_then(|value| value.to_str());
+    if !path_backend.is_some_and(|value| value.eq_ignore_ascii_case(&backend)) {
+        return Err(AppError::Worker("runtime debug python path does not match the selected backend".into()));
+    }
+    Ok((backend, python.to_string_lossy().to_string()))
+}
+
+#[tauri::command]
+pub async fn debug_runtime_override_active(app: AppHandle, payload: DebugActiveRuntimeOverrideRequest) -> AppResult<DebugRuntimePointersPayload> {
+    require_runtime_debug_developer_mode(&app)?;
+    let (backend, python_path) = validate_debug_runtime_override(&payload.backend, &payload.python_path)?;
     let path = storage::active_runtime_file(&app)?;
     create_debug_runtime_backup(&path)?;
     let content = serde_json::json!({
         "backend": backend,
         "pythonPath": python_path,
+        "debugOverride": true,
     });
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -3060,6 +3084,23 @@ mod tests {
         assert!(validate_recording_id("../recording_1720000000000").is_err());
         assert!(validate_recording_id("recording_foo/bar").is_err());
         assert!(validate_recording_id("other_1720000000000").is_err());
+    }
+
+    #[test]
+    fn debug_runtime_override_validates_the_interpreter_and_backend() {
+        let root = temp_test_dir("runtime-debug-override");
+        let python = root.join("cuda").join("bin").join("python");
+        fs::create_dir_all(python.parent().unwrap()).expect("create runtime environment");
+        fs::write(&python, b"stub").expect("write runtime interpreter");
+
+        let (backend, resolved) = validate_debug_runtime_override(" CUDA ", &python.to_string_lossy())
+            .expect("validate runtime override");
+        assert_eq!(backend, "cuda");
+        assert_eq!(PathBuf::from(resolved), python.canonicalize().unwrap());
+        assert!(validate_debug_runtime_override("cpu", &python.to_string_lossy()).is_err());
+        assert!(validate_debug_runtime_override("cuda", "missing/python").is_err());
+
+        fs::remove_dir_all(&root).expect("remove runtime override test root");
     }
 
     #[test]

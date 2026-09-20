@@ -36,6 +36,7 @@ def _default_runtime_envs_dir() -> Path:
 RUNTIME_ENVS_DIR = Path(os.environ.get("PYMSS_STUDIO_RUNTIME_ENVS_DIR") or _default_runtime_envs_dir())
 ACTIVE_RUNTIME_FILE = Path(os.environ.get("PYMSS_STUDIO_ACTIVE_RUNTIME_FILE") or RUNTIME_ENVS_DIR / "active-runtime.json")
 BUNDLED_RUNTIME_ENVS_DIR = Path(os.environ["PYMSS_STUDIO_BUNDLED_RUNTIME_ENVS_DIR"]) if os.environ.get("PYMSS_STUDIO_BUNDLED_RUNTIME_ENVS_DIR") else None
+ALLOW_DEBUG_RUNTIME_OVERRIDE = os.environ.get("PYMSS_STUDIO_ALLOW_DEBUG_RUNTIME_OVERRIDE") == "1"
 
 # Distribution name -> import name, for the manifest packages whose two names differ.
 # Availability is decided with importlib, so an unmapped dashed name can never be found and the
@@ -150,12 +151,19 @@ def _read_runtime_state() -> dict[str, Any] | None:
             except (OSError, ValueError):
                 env_dir = None
             python_path = Path(str(state["pythonPath"]))
+            debug_override = bool(state.get("debugOverride")) and ALLOW_DEBUG_RUNTIME_OVERRIDE
             if env_dir and (
-                (env_dir.name == supported[0] and (_is_user_runtime_env(env_dir) or _is_bundled_runtime_env(env_dir)))
+                (env_dir.name == supported[0] and (
+                    _is_user_runtime_env(env_dir)
+                    or _is_bundled_runtime_env(env_dir)
+                    or debug_override
+                ))
                 or _is_bundled_bootstrap_python(python_path)
             ):
                 if _is_bundled_runtime_env(env_dir) or _is_bundled_bootstrap_python(python_path):
                     state["source"] = "bundled"
+                elif debug_override:
+                    state["source"] = "debug"
                 return state
     if BUNDLED_RUNTIME_ENVS_DIR:
         bundled = _resolve_runtime_state_from(BUNDLED_RUNTIME_ENVS_DIR / "active-runtime.json")

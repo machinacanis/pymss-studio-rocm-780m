@@ -509,6 +509,31 @@ class RuntimePathSafetyTests(unittest.TestCase):
              mock.patch.object(worker_bootstrap, "ACTIVE_RUNTIME_FILE", active):
             self.assertIsNone(worker_bootstrap._read_runtime_state())
 
+    def test_debug_override_accepts_an_external_runtime_only_when_enabled(self):
+        outside = self.root / "outside" / "cuda" / ("Scripts" if os.name == "nt" else "bin")
+        outside.mkdir(parents=True)
+        python_path = outside / ("python.exe" if os.name == "nt" else "python")
+        python_path.write_text("stub", encoding="utf-8")
+        active = self.envs_dir / "active-runtime.json"
+        active.write_text(json.dumps({
+            "backend": "cuda",
+            "pythonPath": str(python_path),
+            "debugOverride": True,
+        }), encoding="utf-8")
+
+        with mock.patch.object(worker_bootstrap, "RUNTIME_ENVS_DIR", self.envs_dir), \
+             mock.patch.object(worker_bootstrap, "ACTIVE_RUNTIME_FILE", active), \
+             mock.patch.object(worker_bootstrap, "ALLOW_DEBUG_RUNTIME_OVERRIDE", True):
+            state = worker_bootstrap._read_runtime_state()
+        self.assertIsNotNone(state)
+        self.assertEqual(state["backend"], "cuda")
+        self.assertEqual(state["source"], "debug")
+
+        with mock.patch.object(worker_bootstrap, "RUNTIME_ENVS_DIR", self.envs_dir), \
+             mock.patch.object(worker_bootstrap, "ACTIVE_RUNTIME_FILE", active), \
+             mock.patch.object(worker_bootstrap, "ALLOW_DEBUG_RUNTIME_OVERRIDE", False):
+            self.assertIsNone(worker_bootstrap._read_runtime_state())
+
     def test_interrupted_reinstall_backup_restores_when_target_is_incomplete(self):
         backup = self.envs_dir / ".cuda.reinstalling"
         (backup / "Scripts").mkdir(parents=True)

@@ -142,7 +142,7 @@ export function normalizeGraphWorkflowDefinition(
   let changed = false
   const nodes = definition.nodes.map((value) => {
     if (!isRecord(value)) return value
-    const type = String(value.type || '')
+    const type = String(value.type || '').replace(/^pymss_/, '')
     if (type !== 'custom_mss_separate' && type !== 'custom_mss_separate_list') return value
 
     const widgets = value.widgets_values

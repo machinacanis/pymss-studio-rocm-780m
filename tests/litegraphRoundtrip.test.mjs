@@ -1,0 +1,281 @@
+import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import test, { after } from 'node:test'
+import { createServer } from 'vite'
+import { reactive } from 'vue'
+import { setupLitegraphEnvDom } from './_litegraphEnv.mjs'
+
+await setupLitegraphEnvDom()
+const vite = await createServer({
+  configFile: false,
+  server: { watch: null, middlewareMode: true, hmr: false, ws: false },
+  appType: 'custom',
+  optimizeDeps: { noDiscovery: true },
+  ssr: { noExternal: ['@comfyorg/litegraph'] },
+})
+after(() => vite.close())
+
+const { LGraph, LiteGraph } = await vite.ssrLoadModule('@comfyorg/litegraph')
+const {
+  registerPymssNodes,
+  allNodeTypes,
+  NODE_SPECS,
+  BUILTIN_SPECS,
+  localizePymssNode,
+  setPymssNodeTranslator,
+} = await vite.ssrLoadModule('/src/litegraph/registerNodes.ts')
+const adapter = await vite.ssrLoadModule('/src/litegraph/graphAdapter.ts')
+registerPymssNodes()
+
+const fixture = name => JSON.parse(readFileSync(new URL(`./fixtures/comfy-mss/${name}.json`, import.meta.url), 'utf8'))
+const jsonClone = value => JSON.parse(JSON.stringify(value))
+const messages = {
+  en: JSON.parse(readFileSync(new URL('../src/i18n/en.json', import.meta.url), 'utf8')),
+  'zh-CN': JSON.parse(readFileSync(new URL('../src/i18n/zh-CN.json', import.meta.url), 'utf8')),
+}
+const translator = locale => (key, named = {}) => {
+  const value = key.split('.').reduce((current, part) => current?.[part], messages[locale])
+  if (typeof value !== 'string') return key
+  return value.replace(/\{(\w+)\}/g, (_, name) => String(named[name] ?? `{${name}}`))
+}
+function load(source) {
+  const graph = new LGraph()
+  graph.configure(adapter.comfyToLitegraph(source))
+  return graph
+}
+const exportGraph = graph => jsonClone(adapter.litegraphToComfy(graph.serialize()))
+
+test('advanced editor locale catalogs cover every registered node type', () => {
+  const expected = Object.keys({ ...NODE_SPECS, ...BUILTIN_SPECS }).sort()
+  for (const locale of ['en', 'zh-CN']) {
+    const actual = Object.keys(messages[locale].workflows.advancedEditor.nodes).sort()
+    assert.deepEqual(actual, expected, locale)
+  }
+})
+
+test('advanced editor labels follow locale without changing workflow data', () => {
+  const source = fixture('example_mss_separate')
+  const en = translator('en')
+  const zh = translator('zh-CN')
+  setPymssNodeTranslator(en)
+  const graph = load(source)
+  for (const node of graph.nodes) localizePymssNode(node, en)
+  const before = exportGraph(graph)
+
+  setPymssNodeTranslator(zh)
+  for (const node of graph.nodes) localizePymssNode(node, zh)
+  const separate = graph.nodes.find(node => String(node.type).includes('mss_separate'))
+  assert.equal(separate.title, 'MSS 分离')
+  assert.equal(separate.widgets.find(widget => widget.name === 'model_name').label, '模型名称')
+  assert.equal(separate.inputs.find(input => input.name === 'audio').label, '音频')
+  assert.match(separate.outputs[0].label, /\(音频\)$/)
+  assert.deepEqual(exportGraph(graph), before, 'display translations must not leak into serialized workflow data')
+
+  const created = LiteGraph.createNode('pymss_audio_ensemble')
+  assert.equal(created.title, '音频集成')
+  assert.equal(created.widgets.find(widget => widget.name === 'weight_1').label, '权重 1')
+  assert.equal(created.inputs[0].localized_name, '音频 1')
+
+  created.title = 'Custom ensemble'
+  created.inputs[0].label = 'Primary mix'
+  localizePymssNode(created, en)
+  assert.equal(created.title, 'Custom ensemble', 'custom node titles must not be overwritten by locale changes')
+  assert.equal(created.inputs[0].label, 'Primary mix', 'custom port labels must not be overwritten by locale changes')
+  const customized = created.serialize()
+  assert.equal(customized.title, 'Custom ensemble')
+  assert.equal(customized.inputs[0].label, 'Primary mix')
+  setPymssNodeTranslator(en)
+})
+
+test('advanced editor localizes nested LiteGraph context menus', () => {
+  const en = translator('en')
+  setPymssNodeTranslator(translator('zh-CN'))
+  const originalBodyRect = document.body.getBoundingClientRect
+  document.body.getBoundingClientRect = () => new window.DOMRect(0, 0, 1280, 720)
+  let menu
+
+  try {
+    menu = new LiteGraph.ContextMenu([
+      { content: 'Mode', submenu: { options: ['Always', 'Never'] } },
+      'Convert to Subgraph 🆕',
+    ], {
+      event: new window.MouseEvent('contextmenu', { clientX: 20, clientY: 20 }),
+      title: 'vr_separate',
+    })
+    assert.equal(menu.root.querySelector('.litemenu-title')?.textContent?.trim(), 'VR 分离')
+    const entries = [...menu.root.querySelectorAll('.litemenu-entry')]
+    const topEntry = entries[0]
+    assert.equal(topEntry?.textContent?.trim(), '运行模式')
+    assert.equal(entries[1]?.textContent?.trim(), '转换为子图 🆕')
+    topEntry?.click()
+
+    const submenu = menu.current_submenu
+    assert.ok(submenu, 'clicking the mode entry should open its submenu')
+    assert.deepEqual(
+      [...submenu.root.querySelectorAll('.litemenu-entry')].map(entry => entry.textContent?.trim()),
+      ['始终运行', '从不运行'],
+    )
+  } finally {
+    menu?.close()
+    document.body.getBoundingClientRect = originalBodyRect
+    setPymssNodeTranslator(en)
+  }
+})
+
+test('reactive workflow definitions load without cloning proxies or mutating their source', () => {
+  const source = reactive(fixture('example_ensemble'))
+  const before = jsonClone(source)
+  const converted = adapter.comfyToLitegraph(source)
+  assert.doesNotThrow(() => structuredClone(converted.extra))
+  const exported = exportGraph(load(source))
+  assert.equal(exported.nodes.length, source.nodes.length)
+  assert.deepEqual(exported.links, source.links)
+  assert.deepEqual(jsonClone(source), before)
+})
+
+test('exported tuples declare schema 0.4 and load without a Studio adapter', () => {
+  const source = fixture('example_mss_separate')
+  // Earlier Studio versions stored tuples under version 1, including numeric-key objects.
+  source.version = 1
+  source.links = source.links.map(link => ({ ...link }))
+  const before = jsonClone(source)
+  const exported = jsonClone(adapter.litegraphToComfy(source))
+  assert.equal(exported.version, 0.4)
+  assert.ok(exported.links.every(link => Array.isArray(link) && link.length === 6))
+  assert.deepEqual(source, before)
+  const graph = new LGraph()
+  graph.configure(exported)
+  assert.deepEqual(exportGraph(graph).links, exported.links)
+  assert.equal(graph.nodes.length, source.nodes.length)
+})
+
+test('new save nodes and upstream five-value imports use the same widget order', () => {
+  const values = ['flac', '32000', 'PCM_16', 'PCM_24', '192k']
+  const source = fixture('example_mss_separate')
+  const save = source.nodes.find(node => node.type === 'pymss_save_audio')
+  save.widgets_values = values
+  save.inputs = save.inputs.filter(input => input.name !== 'output_folder')
+  const graph = load(source)
+  const node = graph.getNodeById(save.id)
+  assert.deepEqual(node.widgets.map(w => w.name), ['output_format', 'sample_rate', 'wav_bit_depth', 'flac_bit_depth', 'mp3_bit_rate'])
+  assert.deepEqual(node.widgets.map(w => w.value), values)
+  assert.deepEqual(LiteGraph.createNode('pymss_save_audio').widgets.map(w => w.name), node.widgets.map(w => w.name))
+  node.widgets.find(w => w.name === 'sample_rate').value = '48000'
+  const exported = exportGraph(graph)
+  assert.deepEqual(exported.nodes.find(n => n.id === save.id).widgets_values, ['flac', '48000', 'PCM_16', 'PCM_24', '192k'])
+  assert.deepEqual(exportGraph(load(exported)).links, exported.links)
+  assert.deepEqual(load(exported).getNodeById(save.id).widgets.map(w => w.value), ['flac', '48000', 'PCM_16', 'PCM_24', '192k'])
+})
+
+test('legacy six-value save nodes retain their output folder across editing and reload', () => {
+  const source = fixture('example_mss_separate')
+  const save = source.nodes.find(node => node.type === 'pymss_save_audio')
+  const values = ['mp3', 'stems', '48000', 'FLOAT', 'PCM_16', '192k']
+  save.widgets_values = values
+  const graph = load(source)
+  const node = graph.getNodeById(save.id)
+  assert.equal(node.widgets.find(w => w.name === 'output_folder').value, 'stems')
+  assert.equal(node.widgets.find(w => w.name === 'sample_rate').value, '48000')
+  const exported = exportGraph(graph)
+  assert.deepEqual(exported.nodes.find(n => n.id === save.id).widgets_values, values)
+  assert.deepEqual(load(exported).getNodeById(save.id).widgets.map(w => w.value), values)
+})
+
+test('save layouts distinguish numeric folders from trailing ComfyUI button values', () => {
+  for (const values of [
+    ['wav', '2026', '48000', 'FLOAT', 'PCM_24', '320k'],
+    ['wav', '48000', 'FLOAT', 'PCM_24', '320k', null],
+  ]) {
+    const graph = new LGraph()
+    const node = LiteGraph.createNode('pymss_save_audio')
+    graph.add(node)
+    node.configure({ ...node.serialize(), widgets_values: values })
+    const folder = node.widgets.find(w => w.name === 'output_folder')
+    assert.equal(folder?.value, values[1] === '2026' ? '2026' : undefined)
+    assert.equal(node.widgets.find(w => w.name === 'sample_rate').value, '48000')
+    const expected = folder ? values : values.slice(0, 5)
+    assert.deepEqual(exportGraph(load(exportGraph(graph))).nodes[0].widgets_values, expected)
+  }
+})
+
+test('prefixed legacy custom separator layouts migrate for both output variants', () => {
+  for (const suffix of ['', '_list']) {
+    const graph = new LGraph()
+    const node = LiteGraph.createNode(`pymss_custom_mss_separate${suffix}`)
+    graph.add(node)
+    const source = exportGraph(graph)
+    source.nodes[0].widgets_values = ['custom.ckpt', 'bs_roformer', 'cpu', true, 'modelscope', '0,1', true]
+    const restored = load(source).nodes[0]
+    assert.deepEqual(restored.widgets.map(w => w.value), ['custom.ckpt', 'bs_roformer', 'cpu', '0,1', true])
+  }
+})
+
+test('ensemble algorithm, all weights and audio connections survive editing and reload', () => {
+  const source = fixture('example_ensemble')
+  const ensemble = source.nodes.find(node => node.type === 'pymss_audio_ensemble')
+  const values = ['2', 'median_fft', '0.25', '1.75', '2', '3', '4', '5', '6', '7', '8', '9']
+  ensemble.widgets_values = values
+  const graph = load(source)
+  const node = graph.getNodeById(ensemble.id)
+  assert.deepEqual(node.widgets.map(w => w.value), values)
+  node.widgets.find(w => w.name === 'weight_2').value = '0.5'
+  const exported = exportGraph(graph)
+  assert.deepEqual(exported.nodes.find(n => n.id === ensemble.id).widgets_values, values.map((v, i) => i === 3 ? '0.5' : v))
+  assert.deepEqual(exported.links, source.links)
+  assert.deepEqual(exportGraph(load(exported)), exported)
+})
+
+test('ensemble input-count edits keep retained links and expose connectable audio inputs', () => {
+  const graph = new LGraph()
+  const ensemble = LiteGraph.createNode('pymss_audio_ensemble')
+  const input = LiteGraph.createNode('pymss_load_audio')
+  graph.add(ensemble)
+  graph.add(input)
+  assert.deepEqual(ensemble.inputs.map(slot => slot.name), ['audio_1', 'audio_2'])
+  input.connect(0, ensemble, 0)
+  const setCount = value => ensemble.widgets[0].setValue(value, { node: ensemble, canvas: { graph_mouse: [0, 0] } })
+  setCount('4')
+  assert.deepEqual(ensemble.inputs.map(slot => slot.name), ['audio_1', 'audio_2', 'audio_3', 'audio_4'])
+  input.connect(0, ensemble, 3)
+  setCount('2')
+  assert.equal(ensemble.inputs.length, 2)
+  assert.equal(graph.links.size, 1)
+  assert.notEqual(ensemble.inputs[0].link, null)
+  assert.equal(ensemble.widgets.length, 12, 'inactive weights still serialize')
+  assert.equal(ensemble.widgets.filter(w => !w.hidden).length, 4)
+  assert.equal(load(exportGraph(graph)).links.size, 1)
+})
+
+test('all separate aliases and list variants have editable widgets and stable outputs', () => {
+  for (const base of ['mss_separate', 'vr_separate', 'custom_mss_separate']) {
+    for (const suffix of ['', '_list']) {
+      for (const prefix of ['', 'pymss_']) {
+        const type = `${prefix}${base}${suffix}`
+        assert.ok(allNodeTypes().includes(type), type)
+        const graph = new LGraph()
+        const node = LiteGraph.createNode(type)
+        graph.add(node)
+        assert.ok(node.widgets.some(w => w.name === 'model_name'), type)
+        assert.ok(node.widgets.some(w => w.name === 'device'), type)
+        node.widgets.find(w => w.name === 'model_name').value = 'model.ckpt'
+        node.widgets.find(w => w.name === 'device').value = 'cpu'
+        if (suffix) assert.deepEqual(node.outputs.map(slot => slot.name), ['audios', 'stem_names'])
+        const restored = load(exportGraph(graph)).nodes[0]
+        assert.equal(restored.widgets.find(w => w.name === 'model_name').value, 'model.ckpt')
+        assert.equal(restored.widgets.find(w => w.name === 'device').value, 'cpu')
+        assert.equal(restored.outputs.length, node.outputs.length)
+      }
+    }
+  }
+})
+
+test('real fixtures retain every node and link through two editor round-trips without Python', () => {
+  for (const name of ['example_mss_separate', 'example_ensemble', 'example_vr_separate', 'example_custom_mss_separate', 'example_batch_separate']) {
+    const source = fixture(name)
+    const exported = exportGraph(load(source))
+    const restored = exportGraph(load(exported))
+    assert.equal(exported.nodes.length, source.nodes.length, name)
+    assert.deepEqual(exported.links, source.links, name)
+    assert.deepEqual(restored, exported, name)
+  }
+})

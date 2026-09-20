@@ -8,10 +8,19 @@
  */
 import { computed, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { LGraph, LGraphCanvas, LiteGraph, type LGraphNode } from '@comfyorg/litegraph'
+import { LGraph, LGraphCanvas, LiteGraph, createBounds, type LGraphNode } from '@comfyorg/litegraph'
 import '@comfyorg/litegraph/style.css'
-import { registerPymssNodes, setSeparateStems, applyModelOptions, refreshNodeModelOptions, NODE_SPECS, BUILTIN_SPECS } from '@/litegraph/registerNodes'
-import { litegraphToComfy, comfyLinksToLitegraph } from '@/litegraph/graphAdapter'
+import {
+  registerPymssNodes,
+  setSeparateStems,
+  applyModelOptions,
+  refreshNodeModelOptions,
+  localizePymssNode,
+  setPymssNodeTranslator,
+  NODE_SPECS,
+  BUILTIN_SPECS,
+} from '@/litegraph/registerNodes'
+import { litegraphToComfy, comfyToLitegraph } from '@/litegraph/graphAdapter'
 import {
   createWorkflowHistory,
   recordWorkflowSnapshot,
@@ -23,7 +32,8 @@ import {
 import { parseModelStems } from '@/utils/workflowSimple'
 import type { ModelEntry } from '@/stores/model'
 import type { NodeSpec } from '@/litegraph/nodeSpecs'
-import { isGraphWorkflowDefinition, normalizeGraphWorkflowDefinition } from '@/workflows/formats'
+import { translateNodeCategory, translateNodeTitle, type NodeTranslator } from '@/litegraph/nodeLocalization'
+import { isGraphWorkflowDefinition } from '@/workflows/formats'
 import { applyGraphDefaultWidgets, type GraphDefaults } from '@/workflows/graphDefaults'
 
 // All node specs the palette offers (pymss nodes + ComfyUI builtin audio/string nodes).
@@ -49,7 +59,8 @@ const emit = defineEmits<{
   'defaults-restored': [defaults: GraphDefaults]
 }>()
 
-const { t } = useI18n()
+const { t, locale } = useI18n()
+const nodeTranslator = t as unknown as NodeTranslator
 const canvasEl = ref<HTMLCanvasElement | null>(null)
 const graphRef = shallowRef<LGraph | null>(null)
 const canvasRef = shallowRef<LGraphCanvas | null>(null)
@@ -105,14 +116,12 @@ function restoreSnapshot(snap: string) {
   const data = JSON.parse(snap)
   configuringGraph = true
   try {
-    graph.configure({
-      ...data,
-      links: Array.isArray(data.links) ? comfyLinksToLitegraph(data.links) : data.links,
-    })
+    graph.configure(comfyToLitegraph(data))
   } finally {
     configuringGraph = false
   }
   for (const node of (graph.nodes as any[])) configureGraphNode(node)
+  restoreViewport()
   // configure() invokes graph change callbacks; restoring history must not
   // create another undo entry from those callbacks.
   if (pendingSnap) cancelAnimationFrame(pendingSnap)
@@ -174,7 +183,7 @@ function stemsForModel(modelNameRaw: string): string[] {
 }
 
 function syncSeparateNodeStems(node: LGraphNode) {
-  const spec = ALL_SPECS[String(node.type)]
+  const spec = ALL_SPECS[String(node.type)] || ALL_SPECS[String(node.type).replace(/^pymss_/, '')]
   if (!spec?.dynamicStems) return
   const modelName = String((node as any).properties?.model_name
     || (node as any).widgets?.find((w: any) => w.name === 'model_name')?.value
@@ -208,10 +217,14 @@ function addNode(type: string, x?: number, y?: number) {
 
 // --- search palette --------------------------------------------------------
 const paletteCategories = computed(() => {
+  locale.value
   const groups: Record<string, { type: string; title: string }[]> = {}
   for (const spec of Object.values(ALL_SPECS)) {
-    const cat = spec.category || 'pymss'
-    ;(groups[cat] ||= []).push({ type: spec.type, title: spec.title })
+    const cat = translateNodeCategory(spec.category || 'pymss', nodeTranslator)
+    ;(groups[cat] ||= []).push({
+      type: spec.type,
+      title: translateNodeTitle(spec, nodeTranslator),
+    })
   }
   return Object.entries(groups).map(([category, items]) => ({ category, items }))
 })
@@ -224,9 +237,35 @@ const paletteFiltered = computed(() => {
 })
 
 // --- (de)serialize ---------------------------------------------------------
+function restoreViewport() {
+  const canvas = canvasRef.value
+  const graph = graphRef.value
+  if (!canvas || !graph) return
+  const viewport = graph.extra?.ds
+  if (viewport && Number.isFinite(viewport.scale) && viewport.scale > 0
+    && Array.isArray(viewport.offset) && viewport.offset.length === 2
+    && viewport.offset.every(Number.isFinite)) {
+    canvas.ds.scale = viewport.scale
+    canvas.ds.offset = [viewport.offset[0], viewport.offset[1]]
+  } else if (graph.nodes.length) {
+    // Bounds are otherwise populated by the first render, after this initial load.
+    for (const node of graph.nodes) node.updateArea(canvas.ctx)
+    const bounds = createBounds(canvas.positionableItems)
+    if (bounds) canvas.ds.fitToBounds(bounds, { zoom: 0.9 })
+  }
+  canvas.setDirty(true, true)
+}
+
 function snapshotDefinition(): Record<string, unknown> {
   const graph = graphRef.value
   if (!graph) return {}
+  const canvas = canvasRef.value
+  if (canvas) {
+    graph.extra = {
+      ...graph.extra,
+      ds: { scale: canvas.ds.scale, offset: [...canvas.ds.offset] },
+    }
+  }
   return litegraphToComfy(graph.serialize()) as unknown as Record<string, unknown>
 }
 
@@ -234,32 +273,20 @@ function loadDefinition(def: Record<string, unknown>) {
   const graph = graphRef.value
   if (!graph) return
   graph.clear()
-  const normalized = normalizeGraphWorkflowDefinition(def)
-  const nodes = Array.isArray(normalized.nodes) ? normalized.nodes : []
-  const links = Array.isArray(normalized.links) ? normalized.links : []
-  // Configure from a comfy-shaped object litegraph can ingest.
-  const data: any = {
-    nodes,
-    links: Array.isArray(links) ? comfyLinksToLitegraph(links) : links,
-    last_node_id: normalized.last_node_id ?? (nodes.length ? Math.max(...nodes.map((n: any) => Number(n.id))) : 0),
-    last_link_id: normalized.last_link_id ?? (links.length ? Math.max(...links.map((l: any) => Number(l[0]))) : 0),
-    groups: Array.isArray(normalized.groups) ? normalized.groups : [],
-    config: normalized.config && typeof normalized.config === 'object' ? normalized.config : {},
-    extra: normalized.extra && typeof normalized.extra === 'object' ? normalized.extra : {},
-    version: 1,
-  }
+  const data = comfyToLitegraph(def)
   configuringGraph = true
   try {
     graph.configure(data)
   } finally {
     configuringGraph = false
   }
-  if (nodes.length && graph.nodes.length === 0) {
+  if (data.nodes.length && graph.nodes.length === 0) {
     throw new Error('LiteGraph did not restore any nodes from the workflow definition')
   }
   // After configure, rebuild dynamic stem outputs for separate nodes and
   // populate model_name combos with the current downloaded list.
   for (const node of graph.nodes as any[]) configureGraphNode(node)
+  restoreViewport()
 }
 
 /**
@@ -327,7 +354,7 @@ watch(definition, () => {
 let resizeObserver: ResizeObserver | null = null
 
 onMounted(() => {
-  registerPymssNodes()
+  registerPymssNodes(nodeTranslator)
   applyTheme()
   if (!canvasEl.value) return
   const graph = new LGraph()
@@ -351,6 +378,7 @@ onMounted(() => {
   resizeObserver = new ResizeObserver(() => (canvas as any).resize())
   resizeObserver.observe(canvasEl.value.parentElement || canvasEl.value)
   canvasEl.value.addEventListener('keydown', onCanvasKey)
+  canvas.resize()
   // Load existing definition (e.g. reopening an editor) or seed a starter graph.
   initializeGraph()
 })
@@ -399,6 +427,12 @@ watch(() => props.models, () => {
   refreshAllModelOptions()
   for (const n of (graphRef.value?.nodes || []) as any[]) syncSeparateNodeStems(n)
 }, { deep: false })
+
+watch(locale, () => {
+  setPymssNodeTranslator(nodeTranslator)
+  for (const node of (graphRef.value?.nodes || []) as any[]) localizePymssNode(node, nodeTranslator)
+  ;(canvasRef.value as any)?.setDirty(true, true)
+})
 
 watch(
   [() => props.defaultDevice, () => props.defaultFormat],
@@ -455,6 +489,7 @@ function configureGraphNode(node: LGraphNode) {
   }
   syncSeparateNodeStems(node)
   refreshNodeModelOptions(node, modelValues.value)
+  localizePymssNode(node, nodeTranslator)
 }
 </script>
 
@@ -471,7 +506,7 @@ function configureGraphNode(node: LGraphNode) {
     </div>
 
     <div v-if="showPalette" class="palette">
-      <input v-model="paletteQuery" class="palette-input" placeholder="Search nodes..." autofocus />
+      <input v-model="paletteQuery" class="palette-input" :placeholder="t('workflows.advancedEditor.searchNodes')" autofocus />
       <div class="palette-list">
         <div v-for="g in paletteFiltered" :key="g.category" class="palette-group">
           <div class="palette-cat">{{ g.category }}</div>

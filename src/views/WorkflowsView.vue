@@ -31,6 +31,7 @@ import {
   isWorkflowLockedByNodeEditor,
 } from '@/utils/workflowEditorState'
 import { isGraphWorkflowDefinition, isSimpleWorkflowDefinition } from '@/workflows/formats'
+import { litegraphToComfy } from '@/litegraph/graphAdapter'
 import {
   countWorkflowSaveOutputs,
   getWorkflowDefinitionIssue,
@@ -545,7 +546,9 @@ async function exportWorkflowDefinition(
   definition: Record<string, unknown>,
 ) {
   try {
-    const payload = definition
+    const payload = isGraphWorkflowDefinition(definition)
+      ? { ...definition, ...litegraphToComfy(definition) }
+      : definition
     const suffix = isGraphWorkflowDefinition(definition)
       ? 'comfy-mss.json'
       : 'pymss-workflow.json'

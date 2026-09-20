@@ -15,8 +15,16 @@ const i18nDir = path.join(srcDir, 'i18n')
  *
  *   t(`settings.themeAccent${...}`)  — SettingsView.vue, StartupOnboarding.vue
  *   t(`nav.${route.name}`)           — TitleBar.vue
+ *   advanced-editor node metadata    — litegraph/nodeLocalization.ts
  */
-const DYNAMIC_KEY_PREFIXES = ['settings.themeAccent', 'nav.']
+const DYNAMIC_KEY_PREFIXES = [
+  'settings.themeAccent',
+  'nav.',
+  'workflows.advancedEditor.categories.',
+  'workflows.advancedEditor.nodes.',
+  'workflows.advancedEditor.fields.',
+  'workflows.advancedEditor.menu.',
+]
 
 /**
  * Copy for features that exist in code but are not surfaced yet. Unreferenced on purpose —

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test, { after, afterEach } from 'node:test'
 import { fileURLToPath } from 'node:url'
+import { readFileSync } from 'node:fs'
 import { createServer, transformWithEsbuild } from 'vite'
 import { parse, compileScript } from 'vue/compiler-sfc'
 import { createRenderer, nextTick, watch } from 'vue'
@@ -10,7 +11,7 @@ const fixturesId = '\0workflow-lifecycle-fixtures'
 const stubs = {
   'vue-router': `export { useRoute, useRouter } from '${fixturesId}'`,
   'vue-i18n': 'export const useI18n = () => ({ t: key => key })',
-  'naive-ui': 'export const darkTheme = {}; export const useMessage = () => ({}); export const useDialog = () => ({})',
+  'naive-ui': `export const darkTheme = {}; export { useMessage } from '${fixturesId}'; export const useDialog = () => ({})`,
   '@vicons/ionicons5': 'export const AlertCircleOutline={}, CheckmarkCircle={}, CubeOutline={}, EllipsisHorizontalOutline={}, GitNetworkOutline={}, MusicalNotesOutline={}, OpenOutline={}, PlayOutline={}, SearchOutline={}',
 }
 const vite = await createServer({
@@ -35,6 +36,8 @@ const vite = await createServer({
         import { reactive } from 'vue'
         export const route = reactive({ path: '/workflows', query: {} })
         export const navigation = []
+        export const messages = []
+        export const useMessage = () => Object.fromEntries(['success', 'error', 'warning'].map(level => [level, text => messages.push({ level, text })]))
         export const useRoute = () => route
         export const useRouter = () => ({ push: async target => { navigation.push(target) } })
       `
@@ -71,7 +74,7 @@ after(() => vite.close())
 const { useWorkflowStore, WorkflowRevisionConflictError } = await vite.ssrLoadModule('/src/stores/workflow.ts')
 const App = (await vite.ssrLoadModule('/src/App.vue')).default
 const WorkflowsView = (await vite.ssrLoadModule('/src/views/WorkflowsView.vue')).default
-const { route, navigation } = await vite.ssrLoadModule(fixturesId)
+const { route, navigation, messages } = await vite.ssrLoadModule(fixturesId)
 App.render = WorkflowsView.render = () => null
 
 const renderer = createRenderer({
@@ -113,6 +116,7 @@ function environment() {
   let listenHook
   const reads = []
   const writes = []
+  const exports = []
   const callbacks = new Map()
   const listeners = new Map()
   let callbackId = 0
@@ -132,6 +136,10 @@ function environment() {
           writes.push(stored)
           return null
         }
+        if (command === 'save_text_file_dialog') {
+          exports.push(args)
+          return args.defaultName
+        }
         if (command === 'plugin:event|listen') {
           if (listenHook) await listenHook()
           listeners.set(args.handler, { event: args.event, handler: callbacks.get(args.handler) })
@@ -148,11 +156,12 @@ function environment() {
   }
   route.path = '/workflows'
   navigation.length = 0
+  messages.length = 0
   const pinia = createPinia()
   const store = useWorkflowStore(pinia)
   stores.push(store)
   return {
-    store, reads, writes, listeners,
+    store, reads, writes, listeners, exports,
     get stored() { return stored },
     set stored(value) { stored = structuredClone(value) },
     set read(value) { readHook = value },
@@ -181,6 +190,43 @@ afterEach(async () => {
   await flush()
   for (const store of stores.splice(0)) store.$dispose()
   Reflect.deleteProperty(globalThis, 'window')
+})
+
+test('overview import and export repair old graph versions without rewriting the saved definition', async () => {
+  const source = JSON.parse(readFileSync(new URL('./fixtures/comfy-mss/example_ensemble.json', import.meta.url), 'utf8'))
+  source.version = 1
+  const env = environment()
+  await env.store.initialize()
+  const page = env.mount(WorkflowsView)
+  const input = { value: 'selected', files: [{ name: 'ensemble.comfy-mss.json', text: async () => JSON.stringify(source) }] }
+  await page.state.handleImportWorkflow({ target: input })
+  await flush()
+  assert.equal(input.value, '')
+  assert.equal(env.store.selectedWorkflow.name, 'ensemble')
+  assert.deepEqual(JSON.parse(JSON.stringify(env.store.selectedWorkflow.definition)), source)
+  await page.state.exportWorkflowEntry(env.store.selectedWorkflow)
+  assert.equal(env.exports.length, 1)
+  assert.equal(env.exports[0].defaultName, 'ensemble.comfy-mss.json')
+  const exported = JSON.parse(env.exports[0].content)
+  assert.equal(exported.version, 0.4)
+  assert.deepEqual(exported.links, source.links)
+  assert.deepEqual(exported.nodes.map(n => n.widgets_values), source.nodes.map(n => n.widgets_values))
+  assert.equal(env.store.selectedWorkflow.definition.version, 1)
+  assert.deepEqual(messages.map(m => m.level), ['success', 'success'])
+  input.files[0].text = async () => JSON.stringify(exported)
+  await page.state.handleImportWorkflow({ target: input })
+  assert.equal(env.store.workflows.length, 3)
+  assert.deepEqual(JSON.parse(JSON.stringify(env.store.selectedWorkflow.definition)), exported)
+})
+
+test('overview export leaves simple workflow definitions unchanged', async () => {
+  const env = environment()
+  await env.store.initialize()
+  const page = env.mount(WorkflowsView)
+  const definition = JSON.parse(JSON.stringify(env.store.selectedWorkflow.definition))
+  await page.state.exportWorkflowEntry(env.store.selectedWorkflow)
+  assert.equal(env.exports[0].defaultName, 'original.pymss-workflow.json')
+  assert.deepEqual(JSON.parse(env.exports[0].content), definition)
 })
 
 test('opening the overview only hydrates details, without rewriting 0.0.16 workflow data', async () => {

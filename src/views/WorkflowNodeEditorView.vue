@@ -53,13 +53,13 @@ const isMacOS = typeof navigator !== 'undefined' && /Mac/i.test(navigator.platfo
 const showCustomWindowChrome = computed(() => isStandaloneWindow.value && !isMacOS)
 const isMaximized = ref(false)
 
-const deviceOptions = [
-  { label: 'Auto', value: 'auto' },
+const deviceOptions = computed(() => [
+  { label: t('workflows.deviceAuto'), value: 'auto' },
   { label: 'CPU', value: 'cpu' },
   { label: 'CUDA', value: 'cuda' },
   { label: 'MPS', value: 'mps' },
   { label: 'MLX', value: 'mlx' },
-]
+])
 const formatOptions = [
   { label: 'WAV', value: 'wav' },
   { label: 'FLAC', value: 'flac' },
@@ -160,7 +160,7 @@ async function persistDefinition(
   try {
     const entry = await workflow.saveWorkflow({
       id: options.saveCopy ? undefined : (editingId.value || undefined),
-      name: options.saveCopy ? `${name.value} Copy` : name.value,
+      name: options.saveCopy ? t('workflows.copyName', { name: name.value }) : name.value,
       description: description.value,
       definition: definitionToSave,
       expectedUpdatedAt: options.saveCopy ? undefined : loadedUpdatedAt.value,
@@ -177,7 +177,7 @@ async function persistDefinition(
       return
     }
     console.error('[workflow-node-editor-view] save failed', error)
-    message.error(error instanceof Error ? error.message : 'Save failed')
+    message.error(error instanceof Error ? error.message : t('workflows.saveFailed'))
   }
 }
 

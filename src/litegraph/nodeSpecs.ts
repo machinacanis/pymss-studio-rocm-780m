@@ -209,7 +209,6 @@ export const NODE_SPECS: Record<string, NodeSpec> = {
       { name: 'audio', type: PORT.AUDIO },
       { name: 'filename', type: PORT.STRING, shape: 7 },
       { name: 'output_format', type: PORT.COMBO, widget: { name: 'output_format' } },
-      { name: 'output_folder', type: PORT.STRING, widget: { name: 'output_folder' } },
       { name: 'sample_rate', type: PORT.COMBO, widget: { name: 'sample_rate' } },
       { name: 'wav_bit_depth', type: PORT.COMBO, widget: { name: 'wav_bit_depth' } },
       { name: 'flac_bit_depth', type: PORT.COMBO, widget: { name: 'flac_bit_depth' } },
@@ -218,8 +217,7 @@ export const NODE_SPECS: Record<string, NodeSpec> = {
     outputs: [],
     widgets: [
       { name: 'output_format', type: 'combo', default: 'wav', options: ['wav', 'flac', 'mp3', 'm4a'] },
-      { name: 'output_folder', type: 'text', default: 'Default' },
-      { name: 'sample_rate', type: 'combo', default: '44100', options: ['44100', '48000', '88200', '96000'] },
+      { name: 'sample_rate', type: 'combo', default: '44100', options: ['32000', '44100', '48000', '88200', '96000'] },
       { name: 'wav_bit_depth', type: 'combo', default: 'FLOAT', options: ['FLOAT', 'PCM_24', 'PCM_16'] },
       { name: 'flac_bit_depth', type: 'combo', default: 'PCM_24', options: ['PCM_24', 'PCM_16'] },
       { name: 'mp3_bit_rate', type: 'combo', default: '320k', options: ['128k', '192k', '256k', '320k'] },
@@ -229,9 +227,16 @@ export const NODE_SPECS: Record<string, NodeSpec> = {
     type: 'pymss_audio_ensemble',
     title: 'Audio Ensemble',
     category: 'pymss/audio_tools',
-    inputs: [],
+    inputs: [
+      { name: 'audio_1', type: PORT.AUDIO, shape: 7 },
+      { name: 'audio_2', type: PORT.AUDIO, shape: 7 },
+    ],
     outputs: [{ name: 'audio', type: PORT.AUDIO }],
-    widgets: [{ name: 'input_count', type: 'number', default: 2 }],
+    widgets: [
+      { name: 'input_count', type: 'combo', default: '2', options: Array.from({ length: 9 }, (_, i) => String(i + 2)) },
+      { name: 'ensemble_type', type: 'combo', default: 'avg_wave', options: ['avg_wave', 'median_wave', 'min_wave', 'max_wave', 'avg_fft', 'median_fft', 'min_fft', 'max_fft'] },
+      ...Array.from({ length: 10 }, (_, i): WidgetSpec => ({ name: `weight_${i + 1}`, type: 'text', default: '1' })),
+    ],
   },
   pymss_audio_invert_phase: {
     type: 'pymss_audio_invert_phase',
@@ -281,6 +286,21 @@ export const NODE_SPECS: Record<string, NodeSpec> = {
     outputs: [{ name: 'STRING', type: PORT.STRING }],
     widgets: [{ name: 'string', type: 'text', default: '' }],
   },
+}
+
+for (const type of ['mss_separate', 'vr_separate', 'custom_mss_separate']) {
+  const spec = NODE_SPECS[type]!
+  NODE_SPECS[`${type}_list`] = {
+    ...spec,
+    type: `${type}_list`,
+    title: `${spec.title} List`,
+    dynamicStems: false,
+    outputs: [
+      { name: 'audios', type: PORT.AUDIO },
+      { name: 'stem_names', type: PORT.STRING },
+    ],
+    widgets: spec.widgets.map(widget => ({ ...widget })),
+  }
 }
 
 export const BUILTIN_SPECS: Record<string, NodeSpec> = {

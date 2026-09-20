@@ -7,8 +7,36 @@
  */
 import { LiteGraph, LGraphNode, LGraphCanvas, type LGraphNode as LGraphNodeType } from '@comfyorg/litegraph'
 import { NODE_SPECS, BUILTIN_SPECS, NodeSpec, WidgetSpec, PORT } from './nodeSpecs'
+import { isWorkflowSeparationNodeType } from '../workflows/formats'
+import {
+  setNodeTranslator,
+  translateAdvancedEditorText,
+  translateLiteGraphMenuText,
+  translateNodeCategory,
+  translateNodeField,
+  translateNodeTitle,
+  type NodeTranslator,
+} from './nodeLocalization'
 
 type AnyNode = any
+
+const DEFAULT_TITLE_FLAG = '__pymssUsesDefaultTitle'
+const LAST_DEFAULT_TITLE = '__pymssLastDefaultTitle'
+const ORIGINAL_LOCALIZED_NAME = '__pymssOriginalLocalizedName'
+const ORIGINAL_LABEL = '__pymssOriginalLabel'
+const LAST_LOCALIZED_LABEL = '__pymssLastLocalizedLabel'
+const LOCALIZE_LABEL_FLAG = '__pymssLocalizeLabel'
+
+function localizeContextMenu(menu: any) {
+  const root = menu?.root as HTMLElement | undefined
+  if (!root) return
+  for (const child of Array.from(root.children) as HTMLElement[]) {
+    if (!child.classList.contains('litemenu-entry') && !child.classList.contains('litemenu-title')) continue
+    const source = child.textContent?.trim() || ''
+    const translated = translateLiteGraphMenuText(source)
+    if (translated !== source) child.textContent = translated
+  }
+}
 
 // litegraph 0.17 的 hidpi 处理是坏的: resize() 把 bgcanvas/canvas 尺寸都设为
 // CSS 像素,但 drawBackCanvas() 里 ctx.setTransform(devicePixelRatio,...) 又乘
@@ -43,7 +71,17 @@ if (typeof window !== 'undefined') {
     const origCtor = CM
     const PatchedCM = function (this: any, ...args: any[]) {
       if (args[1] && typeof args[1] === 'object') args[1].autoopen = args[1].autoopen ?? true
-      return new origCtor(...args)
+      const menu = new origCtor(...args)
+      // LiteGraph opens nested menus through `that.constructor`. The object
+      // returned above is an origCtor instance, so point its constructor back
+      // to this wrapper to keep auto-open and localization active recursively.
+      Object.defineProperty(menu, 'constructor', {
+        configurable: true,
+        value: PatchedCM,
+        writable: true,
+      })
+      localizeContextMenu(menu)
+      return menu
     }
     PatchedCM.prototype = origCtor.prototype
     Object.setPrototypeOf(PatchedCM, origCtor)
@@ -63,10 +101,77 @@ function widgetCallback(node: AnyNode, spec: WidgetSpec) {
     if (spec.name === 'model_name') {
       node.onModelNameChanged?.(v)
     }
+    if (node.type === 'pymss_audio_ensemble' && spec.name === 'input_count') {
+      syncEnsembleInputs(node, v)
+    }
     // Widget edits (changeValue path) do not notify the graph on their own —
     // canvas node ops wrap themselves in beforeChange/afterChange, but
     // widget edits don't. Fire afterChange so undo/save toolbars enable.
     node.graph?.afterChange(node)
+  }
+}
+
+function syncEnsembleInputs(node: AnyNode, value: unknown) {
+  const count = Math.max(2, Math.min(10, Math.trunc(Number(value)) || 2))
+  // Only remove trailing audio slots; retained input indices and links stay intact.
+  for (let i = node.inputs.length - 1; i >= 0; i--) {
+    const match = /^audio_(\d+)$/.exec(node.inputs[i].name)
+    if (match && Number(match[1]) > count) node.removeInput(i)
+  }
+  for (let i = 1; i <= count; i++) {
+    if (!node.inputs.some((slot: any) => slot.name === `audio_${i}`)) {
+      node.addInput(`audio_${i}`, PORT.AUDIO, { shape: 7 })
+    }
+  }
+  for (const widget of node.widgets || []) {
+    const match = /^weight_(\d+)$/.exec(widget.name)
+    if (!match) continue
+    widget.hidden = Number(match[1]) > count
+    // LiteGraph 0.17 still allocates layout space for hidden widgets.
+    widget.computeLayoutSize = widget.hidden ? () => ({ minHeight: 0, maxHeight: 0, minWidth: 0 }) : undefined
+  }
+  node.setSize([node.size[0], node.computeSize()[1]])
+  localizePymssNode(node)
+}
+
+function createWidgets(node: AnyNode, specs: WidgetSpec[]) {
+  node.widgets = []
+  for (const spec of specs) {
+    node.properties[spec.name] = spec.default
+    const widget = node.addWidget(
+      spec.type,
+      spec.name,
+      spec.default,
+      widgetCallback(node, spec),
+      spec.options ? { values: spec.options } : undefined,
+    )
+    if (widget) widget.value = spec.default
+  }
+}
+
+if (typeof window !== 'undefined') {
+  const proto = (LGraphCanvas as any)?.prototype
+  if (proto && !proto.__pymssI18nPatched) {
+    const originalSearch = proto.showSearchBox
+    proto.showSearchBox = function (this: any, ...args: any[]) {
+      const dialog = originalSearch.apply(this, args)
+      const title = dialog?.querySelector?.('.name') as HTMLElement | null
+      const input = dialog?.querySelector?.('input') as HTMLInputElement | null
+      if (title) title.textContent = translateAdvancedEditorText('searchNodes', 'Search nodes')
+      if (input) input.placeholder = translateAdvancedEditorText('searchNodes', 'Search nodes')
+      return dialog
+    }
+    const originalPrompt = proto.prompt
+    proto.prompt = function (this: any, title: string, ...args: any[]) {
+      const translatedTitle = title === 'Value'
+        ? translateAdvancedEditorText('value', title)
+        : title
+      const result = originalPrompt.call(this, translatedTitle, ...args)
+      const button = this.prompt_box?.querySelector?.('button') as HTMLButtonElement | null
+      if (button) button.textContent = translateAdvancedEditorText('confirm', 'OK')
+      return result
+    }
+    proto.__pymssI18nPatched = true
   }
 }
 
@@ -92,6 +197,7 @@ export function setSeparateStems(node: LGraphNodeType, stems: string[]) {
     }
   }
   n.stems = list
+  localizePymssNode(n)
 }
 
 /** Inject the downloaded-model list into every separate node's model_name
@@ -113,28 +219,124 @@ export function refreshNodeModelOptions(node: any, values: string[]) {
   widget.options.values = values
 }
 
+function specForNode(node: AnyNode): NodeSpec | undefined {
+  const type = String(node?.type || '')
+  return NODE_SPECS[type]
+    || BUILTIN_SPECS[type]
+    || NODE_SPECS[type.replace(/^pymss_/, '')]
+}
+
+function captureOriginalSlotMetadata(slot: AnyNode) {
+  if (Object.prototype.hasOwnProperty.call(slot, ORIGINAL_LOCALIZED_NAME)) return
+  const metadata = {
+    [ORIGINAL_LOCALIZED_NAME]: slot.localized_name,
+    [ORIGINAL_LABEL]: slot.label,
+    [LAST_LOCALIZED_LABEL]: undefined,
+    [LOCALIZE_LABEL_FLAG]: slot.label === undefined
+      || slot.label === slot.name
+      || slot.label === slot.localized_name,
+  }
+  for (const [key, value] of Object.entries(metadata)) {
+    Object.defineProperty(slot, key, { configurable: true, value, writable: true })
+  }
+}
+
+function localizeSlots(slots: AnyNode[] | undefined, translator?: NodeTranslator) {
+  for (const slot of slots || []) {
+    captureOriginalSlotMetadata(slot)
+    const translated = translateNodeField(String(slot.name || ''), translator)
+    if (slot[LOCALIZE_LABEL_FLAG]) {
+      const last = slot[LAST_LOCALIZED_LABEL]
+      if (last !== undefined && slot.label !== last && slot.label !== slot[ORIGINAL_LABEL]) {
+        slot[LOCALIZE_LABEL_FLAG] = false
+      } else {
+        slot.label = translated
+        slot[LAST_LOCALIZED_LABEL] = translated
+      }
+    }
+    slot.localized_name = translated
+  }
+}
+
+function usesDefaultTitle(node: AnyNode, spec: NodeSpec) {
+  if (node[DEFAULT_TITLE_FLAG] === false) return false
+  const current = String(node.title || '')
+  const previous = String(node[LAST_DEFAULT_TITLE] || '')
+  if (current && current !== spec.title && current !== previous) {
+    node[DEFAULT_TITLE_FLAG] = false
+    return false
+  }
+  return true
+}
+
+function localizeNodeWithSpec(node: AnyNode, spec: NodeSpec, translator?: NodeTranslator) {
+  if (usesDefaultTitle(node, spec)) {
+    const title = translateNodeTitle(spec, translator)
+    node.title = title
+    node[DEFAULT_TITLE_FLAG] = true
+    node[LAST_DEFAULT_TITLE] = title
+  }
+  for (const widget of node.widgets || []) {
+    widget.label = translateNodeField(String(widget.name || ''), translator)
+  }
+  localizeSlots(node.inputs, translator)
+  localizeSlots(node.outputs, translator)
+}
+
+export function localizePymssNode(node: AnyNode, translator?: NodeTranslator) {
+  const spec = specForNode(node)
+  if (spec) localizeNodeWithSpec(node, spec, translator)
+}
+
+function restoreSerializedLocalizedNames(serialized: AnyNode[] | undefined, runtime: AnyNode[] | undefined) {
+  for (let index = 0; index < (serialized?.length || 0); index++) {
+    const slot = runtime?.[index]
+    const originalLocalizedName = slot?.[ORIGINAL_LOCALIZED_NAME]
+    if (originalLocalizedName === undefined) delete serialized![index].localized_name
+    else serialized![index].localized_name = originalLocalizedName
+
+    if (slot?.[LOCALIZE_LABEL_FLAG]
+      && slot[LAST_LOCALIZED_LABEL] !== undefined
+      && slot.label !== slot[LAST_LOCALIZED_LABEL]
+      && slot.label !== slot[ORIGINAL_LABEL]) {
+      slot[LOCALIZE_LABEL_FLAG] = false
+    }
+    if (slot?.[LOCALIZE_LABEL_FLAG]) {
+      if (slot[ORIGINAL_LABEL] === undefined) delete serialized![index].label
+      else serialized![index].label = slot[ORIGINAL_LABEL]
+    }
+  }
+}
+
+const registeredNodeClasses: { cls: AnyNode; spec: NodeSpec }[] = []
+
+function refreshRegisteredNodeMetadata(translator?: NodeTranslator) {
+  for (const { cls, spec } of registeredNodeClasses) {
+    cls.title = translateNodeTitle(spec, translator)
+    cls.category = translateNodeCategory(spec.category, translator)
+  }
+}
+
+export function setPymssNodeTranslator(translator?: NodeTranslator) {
+  setNodeTranslator(translator)
+  refreshRegisteredNodeMetadata(translator)
+}
+
 function makeNodeClass(spec: NodeSpec): any {
   const klass = class extends LGraphNode {
-    static title = spec.title
-    static category = spec.category
+    static title = translateNodeTitle(spec)
+    static category = translateNodeCategory(spec.category)
     stems: string[] = spec.dynamicStems ? DEFAULT_STEMS : []
 
-    constructor() {
-      super(spec.title)
+    constructor(title?: string) {
+      super(title || translateNodeTitle(spec))
+      ;(this as AnyNode)[DEFAULT_TITLE_FLAG] = !title
+        || title === spec.title
+        || title === translateNodeTitle(spec)
+      ;(this as AnyNode)[LAST_DEFAULT_TITLE] = this.title
       this.serialize_widgets = true
       this.properties = this.properties || {}
-      for (const w of spec.widgets) {
-        if (this.properties[w.name] === undefined) this.properties[w.name] = w.default
-        const wtype = w.type === 'toggle' ? 'toggle' : w.type === 'number' ? 'number' : w.type === 'combo' ? 'combo' : 'text'
-        const widget = this.addWidget(
-          wtype as any,
-          w.name,
-          this.properties[w.name],
-          widgetCallback(this, w) as any,
-          (w.options ? { values: w.options } : undefined) as any,
-        )
-        if (widget) widget.value = this.properties[w.name]
-      }
+      createWidgets(this, spec.widgets)
 
       for (const input of spec.inputs) {
         const extra: any = {}
@@ -154,6 +356,42 @@ function makeNodeClass(spec: NodeSpec): any {
       }
 
       if (spec.isOutput) (this as any).is_output_node = true
+      if (spec.type === 'pymss_audio_ensemble') syncEnsembleInputs(this, this.widgets?.[0]?.value)
+      localizeNodeWithSpec(this, spec)
+    }
+
+    configure(info: any) {
+      const incomingTitle = typeof info.title === 'string' ? info.title : ''
+      const defaultTitle = !incomingTitle
+        || incomingTitle === spec.title
+        || incomingTitle === translateNodeTitle(spec)
+      let widgets = spec.widgets
+      if (spec.type === 'pymss_save_audio') {
+        const values = Array.isArray(info.widgets_values) ? info.widgets_values : []
+        // The rate sits at index 2 in legacy graphs, including numeric folder names.
+        // A trailing ComfyUI button value does not add an output-folder widget.
+        const hasFolder = /^\d+$/.test(String(values[2] ?? ''))
+          || (values.length >= 6 && !/^\d+$/.test(String(values[1] ?? '')))
+        if (hasFolder) {
+          widgets = [widgets[0]!, { name: 'output_folder', type: 'text', default: 'Default' }, ...widgets.slice(1)]
+        }
+      }
+      createWidgets(this, widgets)
+      super.configure(info)
+      ;(this as AnyNode)[DEFAULT_TITLE_FLAG] = defaultTitle
+      for (const widget of this.widgets || []) this.properties[widget.name] = widget.value
+      if (spec.type === 'pymss_audio_ensemble') {
+        syncEnsembleInputs(this, this.widgets?.[0]?.value)
+      }
+      localizePymssNode(this)
+      this.setSize([this.size[0], Math.max(this.size[1], this.computeSize()[1])])
+    }
+
+    onSerialize(data: any) {
+      for (const widget of this.widgets || []) data.properties[widget.name] = widget.value
+      if (usesDefaultTitle(this, spec)) delete data.title
+      restoreSerializedLocalizedNames(data.inputs, this.inputs)
+      restoreSerializedLocalizedNames(data.outputs, this.outputs)
     }
 
     onExecute() {
@@ -171,13 +409,14 @@ export function allNodeTypes(): string[] {
   const types = new Set<string>()
   for (const spec of Object.values(NODE_SPECS)) {
     types.add(spec.type)
-    if (spec.dynamicStems && spec.type.startsWith('mss_')) types.add(`pymss_${spec.type}`)
+    if (isWorkflowSeparationNodeType(spec.type)) types.add(`pymss_${spec.type}`)
   }
   for (const spec of Object.values(BUILTIN_SPECS)) types.add(spec.type)
   return [...types]
 }
 
-export function registerPymssNodes() {
+export function registerPymssNodes(translator?: NodeTranslator) {
+  if (translator) setPymssNodeTranslator(translator)
   if (registered) return
   registered = true
   const register = (spec: NodeSpec, type = spec.type) => {
@@ -185,13 +424,14 @@ export function registerPymssNodes() {
     LiteGraph.registerNodeType(type, cls)
     // registerNodeType 用 type 名派生 category(无 '/' 时置空串,覆盖类的
     // static category),导致右键 Add Node 菜单按类别分组为空。补回 spec.category。
-    cls.category = spec.category
+    cls.category = translateNodeCategory(spec.category)
+    registeredNodeClasses.push({ cls, spec })
   }
   for (const spec of Object.values(NODE_SPECS)) {
     register(spec)
     // pymss registers `pymss_mss_separate` etc. as aliases of the bare names;
     // register the same class under the prefixed name so imported graphs load.
-    if (spec.dynamicStems && spec.type.startsWith('mss_')) {
+    if (isWorkflowSeparationNodeType(spec.type)) {
       register(spec, `pymss_${spec.type}`)
     }
   }

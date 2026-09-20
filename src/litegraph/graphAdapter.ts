@@ -8,7 +8,8 @@
  *  - ensure links are the 6-tuple [id, src, srcSlot, dst, dstSlot, type]
  *  - drop the litegraph-only `floatingLinks` / `reroutes` arrays
  */
-import type { ISerialisedGraph, ISerialisedNode } from '@comfyorg/litegraph/dist/types/serialisation'
+import type { ISerialisedGraph, ISerialisedNode, SerialisableGraph, SerialisableLLink } from '@comfyorg/litegraph/dist/types/serialisation'
+import { normalizeGraphWorkflowDefinition } from '../workflows/formats'
 
 export interface ComfyNode {
   id: number
@@ -35,6 +36,8 @@ export type ComfyLink = [
 ]
 
 export interface ComfyWorkflow {
+  id?: string
+  revision?: number
   last_node_id: number
   last_link_id: number
   nodes: ComfyNode[]
@@ -53,10 +56,11 @@ export function litegraphToComfy(serialized: ISerialisedGraph | any): ComfyWorkf
   const rawNodes: ISerialisedNode[] = serialized.nodes || []
   const nodes: ComfyNode[] = rawNodes.map((n) => {
     const out: ComfyNode = {
+      ...n,
       id: Number(n.id),
       type: String(n.type),
-      pos: Array.isArray(n.pos) ? [Number(n.pos[0]) || 0, Number(n.pos[1]) || 0] : [0, 0],
-      size: Array.isArray(n.size) ? [Number(n.size[0]) || 0, Number(n.size[1]) || 0] : [0, 0],
+      pos: [Number(n.pos?.[0]) || 0, Number(n.pos?.[1]) || 0],
+      size: [Number(n.size?.[0]) || 0, Number(n.size?.[1]) || 0],
       flags: (n.flags as Record<string, unknown>) || {},
       order: Number(n.order ?? 0),
       mode: Number(n.mode ?? 0),
@@ -64,7 +68,7 @@ export function litegraphToComfy(serialized: ISerialisedGraph | any): ComfyWorkf
     if (n.inputs) out.inputs = n.inputs
     if (n.outputs) out.outputs = n.outputs
     if (n.title) out.title = String(n.title)
-    if (n.properties && Object.keys(n.properties).length) out.properties = n.properties
+    out.properties = n.properties || {}
     // litegraph writes widgets_values only when serialize_widgets is set on the node
     const wv = (n as any).widgets_values
     if (Array.isArray(wv)) out.widgets_values = wv
@@ -72,12 +76,7 @@ export function litegraphToComfy(serialized: ISerialisedGraph | any): ComfyWorkf
   })
 
   const links: ComfyLink[] = []
-  for (const l of serialized.links || []) {
-    if (Array.isArray(l)) {
-      if (l.length < 6) continue
-      links.push([Number(l[0]), Number(l[1]), Number(l[2]), Number(l[3]), Number(l[4]), String(l[5])])
-      continue
-    }
+  for (const l of comfyLinksToLitegraph(serialized.links || [])) {
     // litegraph serialize() emits object-format links
     // ({id, origin_id, origin_slot, target_id, target_slot, type});
     // convert them into the comfy 6-tuple so pymss/comfy-mss can read them.
@@ -97,12 +96,15 @@ export function litegraphToComfy(serialized: ISerialisedGraph | any): ComfyWorkf
   }
 
   const wf: ComfyWorkflow = {
-    last_node_id: Number(serialized.last_node_id ?? (nodes.length ? Math.max(...nodes.map((n) => n.id)) : 0)),
-    last_link_id: Number(serialized.last_link_id ?? (links.length ? Math.max(...links.map((l) => l[0])) : 0)),
+    last_node_id: Number(serialized.state?.lastNodeId ?? serialized.last_node_id ?? (nodes.length ? Math.max(...nodes.map((n) => n.id)) : 0)),
+    last_link_id: Number(serialized.state?.lastLinkId ?? serialized.last_link_id ?? (links.length ? Math.max(...links.map((l) => l[0])) : 0)),
     nodes,
     links,
-    version: 1,
+    // ComfyUI schema 1 requires object links and state, not these tuples.
+    version: 0.4,
   }
+  if (typeof serialized.id === 'string') wf.id = serialized.id
+  if (typeof serialized.revision === 'number') wf.revision = serialized.revision
   if (Array.isArray(serialized.groups)) wf.groups = serialized.groups
   if (serialized.config && typeof serialized.config === 'object') wf.config = serialized.config
   if (serialized.extra) wf.extra = serialized.extra
@@ -121,13 +123,13 @@ export function toComfyJson(serialized: ISerialisedGraph | any): string {
  * Without this, configure() sees undefined link ids and collapses every link
  * onto one entry.
  */
-export function comfyLinksToLitegraph(links: unknown[]): Record<string, unknown>[] {
-  const out: Record<string, unknown>[] = []
+export function comfyLinksToLitegraph(links: unknown[]): SerialisableLLink[] {
+  const out: SerialisableLLink[] = []
   for (const l of links || []) {
     // litegraph serialize() already emits object-format links
     // ({id, origin_id, ...}) — exactly what configure() wants.
     if (l && typeof l === 'object' && !Array.isArray(l) && (l as any).origin_id !== undefined) {
-      out.push(l as Record<string, unknown>)
+      out.push(l as SerialisableLLink)
       continue
     }
     // Comfy 6-tuple, either a real array or the numeric-key object
@@ -149,4 +151,30 @@ export function comfyLinksToLitegraph(links: unknown[]): Record<string, unknown>
     })
   }
   return out
+}
+
+/** Accept native ComfyUI graphs and the tuple/object hybrids saved by older Studio versions. */
+export function comfyToLitegraph(definition: Record<string, unknown>): SerialisableGraph & { nodes: ISerialisedNode[] } {
+  // Vue definitions can be proxies; LiteGraph structured-clones extra metadata.
+  const normalized = normalizeGraphWorkflowDefinition(JSON.parse(JSON.stringify(definition)))
+  const nodes = Array.isArray(normalized.nodes) ? normalized.nodes : []
+  const links = comfyLinksToLitegraph(Array.isArray(normalized.links) ? normalized.links : [])
+  const state = normalized.state && typeof normalized.state === 'object'
+    ? normalized.state as Record<string, unknown>
+    : {}
+  return {
+    ...normalized,
+    id: (typeof normalized.id === 'string' ? normalized.id : crypto.randomUUID()) as SerialisableGraph['id'],
+    revision: typeof normalized.revision === 'number' ? normalized.revision : 0,
+    nodes,
+    links,
+    state: {
+      ...state,
+      lastNodeId: Math.max(Number(state.lastNodeId || normalized.last_node_id || 0), ...nodes.map(n => Number(n.id) || 0)),
+      lastLinkId: Math.max(Number(state.lastLinkId || normalized.last_link_id || 0), ...links.map(l => Number(l.id) || 0)),
+      lastGroupId: Number(state.lastGroupId || 0),
+      lastRerouteId: Number(state.lastRerouteId || 0),
+    },
+    version: 1,
+  }
 }

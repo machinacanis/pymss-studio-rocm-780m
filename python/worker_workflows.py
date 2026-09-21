@@ -17,6 +17,7 @@ Contract (payload fields, sent by stores/task.ts via start_workflow_inference):
 from __future__ import annotations
 
 import json
+import math
 import re
 import tempfile
 import traceback
@@ -490,8 +491,10 @@ def _apply_simple_ensembles(dag: Any, definition: dict[str, Any], *, input_path:
                 weight = float(value.get("weight", 1))
             except (TypeError, ValueError) as exc:
                 raise RuntimeError(f"Ensemble {ensemble_id} input weight is invalid") from exc
-            if weight <= 0:
-                raise RuntimeError(f"Ensemble {ensemble_id} input weight must be greater than zero")
+            if not math.isfinite(weight) or weight <= 0:
+                raise RuntimeError(
+                    f"Ensemble {ensemble_id} input weight must be finite and greater than zero"
+                )
             weights.append(weight)
             source_node_id, source_slot = produced_source
             links.append(graph.DAGLink(

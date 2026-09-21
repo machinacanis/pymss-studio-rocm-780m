@@ -219,6 +219,22 @@ test('overview import and export repair old graph versions without rewriting the
   assert.deepEqual(JSON.parse(JSON.stringify(env.store.selectedWorkflow.definition)), exported)
 })
 
+test('workflow type filters do not replace the global separation target', async () => {
+  const env = environment()
+  env.stored = {
+    workflows: [entry('simple-target'), entry('advanced-browser', 17, 'advanced')],
+    selectedWorkflowId: 'simple-target',
+  }
+  await env.store.initialize()
+  const page = env.mount(WorkflowsView)
+
+  page.state.setWorkflowTypeFilter('advanced')
+  await flush()
+
+  assert.equal(env.store.selectedWorkflowId, 'simple-target')
+  assert.deepEqual(page.state.filteredWorkflows.map(item => item.id), ['advanced-browser'])
+})
+
 test('overview export leaves simple workflow definitions unchanged', async () => {
   const env = environment()
   await env.store.initialize()

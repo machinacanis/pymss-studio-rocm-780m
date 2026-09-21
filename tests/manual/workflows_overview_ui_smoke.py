@@ -94,6 +94,9 @@ with sync_playwright() as playwright:
     page.locator(".wf-type-filter button", has_text="Simple").click()
     expect(page.locator(".wf-row--simple")).to_be_visible()
     expect(page.locator(".wf-row--advanced")).to_have_count(0)
+    expect(page.locator(".wf-kind-badge--advanced")).to_have_text("Advanced")
+
+    page.locator(".wf-row--simple").click()
     expect(page.locator(".wf-kind-badge--simple")).to_have_text("Simple")
     expect(page.locator(".wf-metrics .wf-metric")).to_have_count(4)
     expect(page.get_by_role("button", name="Edit steps", exact=True)).to_be_visible()

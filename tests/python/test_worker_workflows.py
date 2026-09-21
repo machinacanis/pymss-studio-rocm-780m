@@ -223,6 +223,55 @@ class WorkflowOutputMetadataTests(unittest.TestCase):
         self.assertEqual(step_metadata, [{"stem": "Vocals", "filename": ""}])
         self.assertEqual(ensemble_metadata, [{"stem": "Vocals", "filename": "Vocals_2.flac"}])
 
+    def test_simple_ensemble_rejects_non_finite_weights_in_worker(self) -> None:
+        class DAGLink:
+            def __init__(self, **values):
+                self.__dict__.update(values)
+
+        class DAGNode:
+            def __init__(self, *, id, type, inputs, data, title=""):
+                self.id = id
+                self.type = type
+                self.inputs = inputs
+                self.data = data
+                self.title = title
+
+        graph_module = ModuleType("pymss.graph")
+        graph_module.DAGLink = DAGLink
+        graph_module.DAGNode = DAGNode
+        graph_module.AUDIO = "AUDIO"
+        graph_module.STRING = "STRING"
+        pymss_module = ModuleType("pymss")
+        pymss_module.graph = graph_module
+
+        for weight in (float("nan"), float("inf"), float("-inf")):
+            with self.subTest(weight=weight):
+                dag = SimpleNamespace(nodes=[
+                    DAGNode(id="input", type="input_audio", inputs=[], data={}),
+                    DAGNode(id="step:model", type="mss_separate", inputs=[], data={}),
+                ])
+                definition = {
+                    "steps": [{"id": "model", "stems": ["Vocals"]}],
+                    "ensembles": [{
+                        "id": "blend",
+                        "inputs": [
+                            {"source": "input", "weight": 1},
+                            {"source": "model.Vocals", "weight": weight},
+                        ],
+                        "algorithm": "avg_wave",
+                        "output_stem": "Vocals",
+                        "save": False,
+                    }],
+                }
+                with patch.dict("sys.modules", {"pymss": pymss_module, "pymss.graph": graph_module}):
+                    with self.assertRaisesRegex(RuntimeError, "finite and greater than zero"):
+                        _apply_simple_ensembles(
+                            dag,
+                            definition,
+                            input_path="D:/Audio/song.wav",
+                            output_format="wav",
+                        )
+
     def test_intermediate_outputs_follow_explicit_save_links(self) -> None:
         definition = {
             "version": 1,

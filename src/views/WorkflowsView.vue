@@ -156,11 +156,6 @@ function workflowTypeLabel(item: WorkflowEntry) {
 
 function setWorkflowTypeFilter(value: WorkflowTypeFilter) {
   typeFilter.value = value
-  const currentId = selectedWorkflowId.value
-  if (currentId && filteredWorkflows.value.some(item => item.id === currentId)) return
-  const fallback = filteredWorkflows.value[0] || null
-  syncWorkflowDetails(fallback)
-  workflow.selectWorkflow(fallback?.id || '')
 }
 
 const isNodeEditorOpen = computed(() => (

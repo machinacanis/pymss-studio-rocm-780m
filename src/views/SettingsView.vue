@@ -185,6 +185,11 @@ const runtimeCurrentLabel = computed(() => {
 const installedRuntimes = computed(() => app.runtimeInfo?.installedEnvironments || [])
 const latestPymssVersion = computed(() => app.runtimeCoreVersions?.packages?.pymss?.latestVersion || null)
 const latestPymssCoreVersion = computed(() => app.runtimeCoreVersions?.packages?.['pymss-core']?.latestVersion || null)
+const runtimeCoreVersionCheckReady = computed(() => (
+  !app.runtimeCoreVersionsLoading
+  && Boolean(latestPymssVersion.value)
+  && Boolean(latestPymssCoreVersion.value)
+))
 
 type BackendCardState = 'active' | 'installed' | 'not_installed'
 
@@ -545,6 +550,33 @@ async function updateRuntimeCore(card: { backend: RuntimeBackend; env?: Installe
   }
 }
 
+async function repairRuntimeDependencies(card: RuntimeBackendCard) {
+  if (
+    runtimeBusy.value
+    || !runtimeCoreVersionCheckReady.value
+    || card.coreUpdateAvailable
+    || card.manifestNewer
+    || !card.env
+    || card.env.coreUpdateSupported === false
+  ) return
+  const confirmed = await confirmRuntimeAction(
+    t('settings.runtimeDependencyRepairTitle'),
+    t('settings.runtimeDependencyRepairContent', {
+      backend: runtimeBackendLabel(card.backend),
+    }),
+    t('settings.runtimeDependencyRepair'),
+  )
+  if (!confirmed) return
+  try {
+    await app.updateRuntimeCore(card.backend, runtimeMirror.value, currentLocale.value, {
+      pythonPath: card.env.pythonPath,
+      repairDependencies: true,
+    })
+  } catch (error) {
+    message.error(error instanceof Error ? error.message : String(error))
+  }
+}
+
 const proxyModeOptions = computed(() => [
   { value: 'none' as const, label: t('settings.proxyModeNone') },
   { value: 'system' as const, label: t('settings.proxyModeSystem') },
@@ -688,7 +720,11 @@ const buildFingerprint = computed(() => {
 
 watch(() => app.runtimeCoreUpdateStatus, (status, previous) => {
   if (previous !== 'updating') return
-  if (status === 'success') message.success(t('settings.runtimeCoreUpdateSuccess'))
+  if (status === 'success') {
+    message.success(t(app.runtimeCoreUpdateMode === 'repair'
+      ? 'settings.runtimeDependencyRepairSuccess'
+      : 'settings.runtimeCoreUpdateSuccess'))
+  }
 })
 function isOfficialRepositoryBuild(info: BuildInfo) {
   return info.official
@@ -1481,7 +1517,7 @@ onMounted(async () => {
                 <div v-if="card.env" class="runtime-env-card__meta">
                   <span v-if="card.env.torchVersion">{{ t('settings.runtimeTorchVersion', { version: card.env.torchVersion }) }}</span>
                   <span>{{ runtimeCoreVersionLabel(card) }}</span>
-                  <span v-if="card.coreUpdateAvailable" class="runtime-env-card__accel runtime-env-card__accel--warn">
+                  <span v-if="runtimeCoreVersionCheckReady && card.coreUpdateAvailable" class="runtime-env-card__accel runtime-env-card__accel--warn">
                     {{ t('settings.runtimeCoreUpdateAvailable', {
                       pymss: latestPymssVersion || t('settings.runtimeCoreVersionUnknown'),
                       core: latestPymssCoreVersion || t('settings.runtimeCoreVersionUnknown'),
@@ -1534,11 +1570,27 @@ onMounted(async () => {
                     {{ card.installing ? t('settings.runtimeInstalling') : t('settings.runtimeRepair') }}
                   </n-button>
                   <n-button
-                    v-if="card.coreUpdateAvailable && card.state === 'active'"
+                    v-if="runtimeCoreVersionCheckReady
+                      && card.state === 'active'
+                      && !card.coreUpdateAvailable
+                      && !card.manifestNewer
+                      && card.env?.source !== 'bundled'
+                      && card.env?.coreUpdateSupported !== false"
+                    size="tiny"
+                    secondary
+                    :loading="runtimeCoreUpdating && app.runtimeCoreUpdateMode === 'repair'"
+                    :disabled="runtimeBusy"
+                    @click="repairRuntimeDependencies(card)"
+                  >
+                    <template #icon><n-icon :component="RefreshOutline" /></template>
+                    {{ t('settings.runtimeDependencyRepair') }}
+                  </n-button>
+                  <n-button
+                    v-if="runtimeCoreVersionCheckReady && card.coreUpdateAvailable && card.state === 'active'"
                     size="tiny"
                     secondary
                     type="warning"
-                    :loading="runtimeCoreUpdating"
+                    :loading="runtimeCoreUpdating && app.runtimeCoreUpdateMode === 'update'"
                     :disabled="runtimeBusy"
                     @click="updateRuntimeCore(card)"
                   >
@@ -1594,7 +1646,11 @@ onMounted(async () => {
                 </div>
                 <div v-if="card.state === 'active' && runtimeCoreUpdating" class="runtime-env-card__progress">
                   <n-spin size="small" />
-                  <span class="runtime-env-card__progress-msg">{{ app.runtimeCoreUpdateMessage || t('settings.runtimeCoreUpdating') }}</span>
+                  <span class="runtime-env-card__progress-msg">
+                    {{ app.runtimeCoreUpdateMessage || t(app.runtimeCoreUpdateMode === 'repair'
+                      ? 'settings.runtimeDependencyRepairing'
+                      : 'settings.runtimeCoreUpdating') }}
+                  </span>
                 </div>
               </div>
             </div>

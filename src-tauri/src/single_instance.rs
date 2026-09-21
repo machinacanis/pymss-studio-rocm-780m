@@ -1,13 +1,20 @@
-//! Keep the desktop application single-instance on Windows.
+//! Keep the desktop application single-instance on every supported platform.
 //!
 //! The managed-update helper is started with a command-line mode and exits
 //! before this check is reached, so it can still run while the main process is
-//! shutting down. Only normal application launches acquire this mutex.
+//! shutting down. Only normal application launches acquire this lock.
 
 #[cfg(windows)]
 use std::os::windows::ffi::OsStrExt;
 #[cfg(windows)]
 use std::path::Path;
+
+#[cfg(unix)]
+use std::fs::{File, OpenOptions};
+#[cfg(unix)]
+use std::os::fd::AsRawFd;
+#[cfg(unix)]
+use std::path::{Path, PathBuf};
 
 #[cfg(windows)]
 use windows_sys::core::BOOL;
@@ -30,6 +37,11 @@ const INSTANCE_MUTEX_NAME: &str = "Local\\PymssStudioMainInstance";
 #[cfg(windows)]
 pub(crate) struct InstanceMutex(HANDLE);
 
+#[cfg(unix)]
+pub(crate) struct InstanceMutex {
+    file: File,
+}
+
 #[cfg(windows)]
 impl Drop for InstanceMutex {
     fn drop(&mut self) {
@@ -40,11 +52,21 @@ impl Drop for InstanceMutex {
     }
 }
 
+#[cfg(unix)]
+impl Drop for InstanceMutex {
+    fn drop(&mut self) {
+        unsafe {
+            libc::flock(self.file.as_raw_fd(), libc::LOCK_UN);
+        }
+    }
+}
+
 /// Acquire the main-process mutex.
 ///
 /// Returns a guard for the first instance. When another copy is already
-/// running, it focuses that copy and returns `Ok(None)`, allowing the
-/// duplicate process to exit before Tauri creates another WebView window.
+/// running, it returns `Ok(None)`, allowing the duplicate process to exit
+/// before Tauri creates another WebView window. Windows also focuses the
+/// existing main window.
 #[cfg(windows)]
 pub fn acquire_or_focus() -> Result<Option<InstanceMutex>, String> {
     let name = std::ffi::OsStr::new(INSTANCE_MUTEX_NAME)
@@ -65,9 +87,63 @@ pub fn acquire_or_focus() -> Result<Option<InstanceMutex>, String> {
     Ok(Some(InstanceMutex(handle)))
 }
 
-#[cfg(not(windows))]
-pub fn acquire_or_focus() -> Result<Option<()>, String> {
-    Ok(Some(()))
+#[cfg(unix)]
+pub fn acquire_or_focus() -> Result<Option<InstanceMutex>, String> {
+    acquire_lock(&instance_lock_path())
+}
+
+#[cfg(unix)]
+fn instance_lock_path() -> PathBuf {
+    let user_id = unsafe { libc::geteuid() };
+    Path::new("/tmp").join(format!("pymss-studio-main-{user_id}.lock"))
+}
+
+#[cfg(unix)]
+fn acquire_lock(path: &Path) -> Result<Option<InstanceMutex>, String> {
+    let file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(&path)
+        .map_err(|error| error.to_string())?;
+    let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if result == 0 {
+        return Ok(Some(InstanceMutex { file }));
+    }
+    let error = std::io::Error::last_os_error();
+    if error
+        .raw_os_error()
+        .is_some_and(|code| code == libc::EWOULDBLOCK || code == libc::EAGAIN)
+    {
+        return Ok(None);
+    }
+    Err(error.to_string())
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::{acquire_lock, instance_lock_path};
+
+    #[test]
+    fn unix_instance_lock_path_does_not_depend_on_process_temp_environment() {
+        assert_eq!(
+            instance_lock_path().parent(),
+            Some(std::path::Path::new("/tmp")),
+        );
+    }
+
+    #[test]
+    fn unix_lock_excludes_another_instance_until_the_guard_is_dropped() {
+        let path = std::env::temp_dir().join(format!(
+            "pymss-studio-single-instance-test-{}",
+            std::process::id(),
+        ));
+        let first = acquire_lock(&path).unwrap().unwrap();
+        assert!(acquire_lock(&path).unwrap().is_none());
+        drop(first);
+        assert!(acquire_lock(&path).unwrap().is_some());
+        let _ = std::fs::remove_file(path);
+    }
 }
 
 #[cfg(windows)]

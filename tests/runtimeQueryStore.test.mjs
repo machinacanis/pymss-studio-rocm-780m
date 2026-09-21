@@ -363,6 +363,38 @@ test('core-update ACK returns before its terminal success, then refreshes withou
   assert.ok(calls.includes('runtime_core_versions'))
 })
 
+test('dependency repair reuses the core-update queue and forwards repair mode', async () => {
+  const calls = []
+  const app = appStore(async (command, args) => {
+    calls.push({ command, args })
+    if (command === 'start_runtime_core_update') return true
+    if (command === 'runtime_info') return { ready: true }
+    if (command === 'runtime_core_versions' || command === 'get_env_info') return {}
+    throw new Error(`unexpected ${command}`)
+  })
+
+  const taskId = await app.updateRuntimeCore('cuda', 'pypi', 'zh-CN', {
+    pythonPath: 'D:/runtime/cuda/Scripts/python.exe',
+    repairDependencies: true,
+  })
+
+  assert.equal(app.runtimeCoreUpdateMode, 'repair')
+  assert.deepEqual(calls[0], {
+    command: 'start_runtime_core_update',
+    args: {
+      payload: {
+        taskId,
+        backend: 'cuda',
+        mirror: 'pypi',
+        locale: 'zh-CN',
+        pythonPath: 'D:/runtime/cuda/Scripts/python.exe',
+        repairDependencies: true,
+      },
+    },
+  })
+  app.handleRuntimeEvent({ type: 'runtime_core_update_finished', taskId, payload: {} })
+})
+
 test('queued core-update cancellation skips start IPC and clears its task state', async () => {
   const probe = deferred()
   const calls = []

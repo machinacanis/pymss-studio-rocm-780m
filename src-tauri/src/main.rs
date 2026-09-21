@@ -22,8 +22,8 @@ fn main() {
         std::process::exit(code);
     }
     // Managed-update/helper modes return above. Normal launches acquire a
-    // process-wide mutex so a second launch focuses the existing UI instead
-    // of creating another WebView process and conflicting with the updater.
+    // process-wide lock so a second launch cannot create another WebView
+    // process and operate on the same runtime environment concurrently.
     let _single_instance = match single_instance::acquire_or_focus() {
         Ok(Some(guard)) => Some(guard),
         Ok(None) => return,

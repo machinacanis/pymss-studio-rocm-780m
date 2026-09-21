@@ -1880,6 +1880,7 @@ def cmd_update_runtime_core(payload: dict[str, Any]) -> int:
     backend = str(payload.get("backend") or "").strip().lower()
     mirror = str(payload.get("mirror") or "auto").strip().lower()
     locale = str(payload.get("locale") or "").strip().lower()
+    repair_dependencies = bool(payload.get("repairDependencies"))
     manifest = _manifest()
     _recover_runtime_transactions()
     supported = _supported_backend(backend)
@@ -1917,7 +1918,9 @@ def cmd_update_runtime_core(payload: dict[str, Any]) -> int:
         from worker_protocol import emit_error
         return emit_error("RUNTIME_CORE_UPDATE_INACTIVE", "Core update is only available for the currently active runtime. Please switch to this environment first.", task_id=task_id, recoverable=True)
     manifest_status = _runtime_manifest_status(state.get("manifestVersion"), manifest.get("manifestVersion"))
-    if manifest_status not in {"current", "older"}:
+    if manifest_status not in {"current", "older"} and not (
+        repair_dependencies and manifest_status == "unknown"
+    ):
         from worker_protocol import emit_error
         return emit_error(
             "RUNTIME_MANIFEST_INCOMPATIBLE",
@@ -1927,20 +1930,48 @@ def cmd_update_runtime_core(payload: dict[str, Any]) -> int:
             recoverable=True,
         )
     mirror, index_url = ("pypi", PYPI_MIRROR_URLS["pypi"]) if mirror == "auto" else _resolve_pypi_mirror(mirror, locale)
-    try:
-        target_pymss_version = _latest_pypi_version("pymss")
-    except Exception as exc:
-        from worker_protocol import emit_error
-        return emit_error("RUNTIME_CORE_UPDATE_FAILED", f"Failed to resolve latest pymss version from PyPI: {exc}", task_id=task_id, recoverable=True)
-    try:
-        target_pymss_core_version = _latest_pypi_version("pymss-core")
-    except Exception as exc:
-        from worker_protocol import emit_error
-        return emit_error("RUNTIME_CORE_UPDATE_FAILED", f"Failed to resolve latest pymss-core version from PyPI: {exc}", task_id=task_id, recoverable=True)
+    package_versions = state.get("packageVersions") if isinstance(state.get("packageVersions"), dict) else {}
+
+    def installed_repair_version(name: str, direct_key: str) -> str:
+        if not repair_dependencies:
+            return ""
+        actual = str(state.get(direct_key) or package_versions.get(name) or "").strip()
+        requirement_value = manifest.get("common", {}).get(name)
+        if not actual or not requirement_value:
+            return ""
+        try:
+            requirement = Requirement(str(requirement_value))
+            return actual if not requirement.specifier or Version(actual) in requirement.specifier else ""
+        except Exception:
+            return ""
+
+    target_pymss_version = installed_repair_version("pymss", "pymssVersion")
+    if not target_pymss_version:
+        try:
+            target_pymss_version = _latest_pypi_version("pymss")
+        except Exception as exc:
+            from worker_protocol import emit_error
+            return emit_error("RUNTIME_CORE_UPDATE_FAILED", f"Failed to resolve latest pymss version from PyPI: {exc}", task_id=task_id, recoverable=True)
+    target_pymss_core_version = installed_repair_version("pymss-core", "pymssCoreVersion")
+    if not target_pymss_core_version:
+        try:
+            target_pymss_core_version = _latest_pypi_version("pymss-core")
+        except Exception as exc:
+            from worker_protocol import emit_error
+            return emit_error("RUNTIME_CORE_UPDATE_FAILED", f"Failed to resolve latest pymss-core version from PyPI: {exc}", task_id=task_id, recoverable=True)
     log_path = env_dir / "pymss-core-update.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    log_path.write_text(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] update pymss core mirror={mirror}\n", encoding="utf-8")
-    _emit("runtime_core_update_started", {"backend": backend, "logPath": str(log_path)}, task_id)
+    operation = "repair runtime dependencies" if repair_dependencies else "update pymss core"
+    log_path.write_text(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {operation} mirror={mirror}\n", encoding="utf-8")
+    _emit(
+        "runtime_core_update_started",
+        {
+            "backend": backend,
+            "logPath": str(log_path),
+            "mode": "repair" if repair_dependencies else "update",
+        },
+        task_id,
+    )
 
     def append_log(stage: str, message: str) -> None:
         with log_path.open("a", encoding="utf-8", errors="replace") as file:
@@ -1959,8 +1990,9 @@ def cmd_update_runtime_core(payload: dict[str, Any]) -> int:
         return emit_error("RUNTIME_CORE_UPDATE_FAILED", "Unable to determine the installed Torch version; refusing to update the runtime core.", task_id=task_id, recoverable=True)
     constraints_path: Path | None = None
     try:
-        # Update the selected environment directly. A failed pip run may need a retry, but must
-        # never remove or replace this directory. Runtime metadata is committed after validation.
+        # Keep the installed Torch build and repair/update the environment in place. If a pip
+        # operation is interrupted, the environment manager exposes an explicit dependency
+        # reinstall action instead of copying the complete multi-gigabyte runtime beforehand.
         _repair_runtime_venv_config(env_dir)
         common_requirements = [
             str(requirement)
@@ -1993,7 +2025,7 @@ def cmd_update_runtime_core(payload: dict[str, Any]) -> int:
         )
         pymss_core_requirement = f"pymss-core=={target_pymss_core_version}"
         requirements = [pymss_requirement, pymss_core_requirement]
-        if manifest_status == "older":
+        if manifest_status == "older" or repair_dependencies:
             requirements.extend([*common_requirements, *backend_extras])
         command.extend(requirements)
 
@@ -2027,7 +2059,14 @@ def cmd_update_runtime_core(payload: dict[str, Any]) -> int:
             if process.wait() != 0:
                 raise RuntimeError(f"pip failed during {stage} with exit code {process.returncode}")
 
-        _emit("runtime_core_update_stage", {"stage": "prepare", "message": "Preparing core package update"}, task_id)
+        _emit(
+            "runtime_core_update_stage",
+            {
+                "stage": "prepare",
+                "message": "Preparing dependency reinstall" if repair_dependencies else "Preparing core package update",
+            },
+            task_id,
+        )
         _ensure_runtime_pip(python_path, task_id, append_log)
 
         # Releases before the metadata-preserving prune fix may have a working package but no
@@ -2063,12 +2102,37 @@ def cmd_update_runtime_core(payload: dict[str, Any]) -> int:
                     + ", ".join(sorted(remaining_records))
                 )
 
-        stage = "manifest" if manifest_status == "older" else "core"
+        if repair_dependencies:
+            force_command = [
+                str(python_path), "-m", "pip", "install", "--force-reinstall", "--no-deps",
+                "--no-cache-dir", "--only-binary=:all:", "--prefer-binary",
+            ]
+            force_command.extend(["--constraint", str(constraints_path)])
+            if index_url:
+                force_command.extend(["--index-url", index_url])
+            force_command.extend(requirements)
+            _emit(
+                "runtime_core_update_stage",
+                {
+                    "stage": "repair",
+                    "message": "Reinstalling runtime dependencies without replacing Torch",
+                    "command": "pip install --force-reinstall --no-deps " + " ".join(requirements),
+                },
+                task_id,
+            )
+            run_pip(force_command, "repair")
+
+        stage = "repair-resolve" if repair_dependencies else ("manifest" if manifest_status == "older" else "core")
         _emit(
             "runtime_core_update_stage",
             {
                 "stage": stage,
-                "message": "Synchronizing runtime dependencies" if stage == "manifest" else "Updating core packages",
+                "message": (
+                    "Restoring missing transitive dependencies"
+                    if repair_dependencies
+                    else "Synchronizing runtime dependencies" if stage == "manifest"
+                    else "Updating core packages"
+                ),
                 "command": "pip install " + " ".join(requirements),
             },
             task_id,
@@ -2117,8 +2181,20 @@ def cmd_update_runtime_core(payload: dict[str, Any]) -> int:
             env_state.pop("source", None)
             _atomic_write_json(env_state_path, env_state)
         _write_runtime_state(updated)
-        append_log("complete", "Core package update completed")
-        _emit("runtime_core_update_finished", {"backend": backend, "state": updated, "logPath": str(log_path)}, task_id)
+        append_log(
+            "complete",
+            "Runtime dependency reinstall completed" if repair_dependencies else "Core package update completed",
+        )
+        _emit(
+            "runtime_core_update_finished",
+            {
+                "backend": backend,
+                "state": updated,
+                "logPath": str(log_path),
+                "mode": "repair" if repair_dependencies else "update",
+            },
+            task_id,
+        )
         return 0
     except Exception as exc:
         from worker_protocol import emit_error

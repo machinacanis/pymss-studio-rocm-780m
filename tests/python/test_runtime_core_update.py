@@ -98,7 +98,7 @@ class RuntimeCoreUpdateTests(unittest.TestCase):
         }), encoding="utf-8")
         return env_dir, python_path
 
-    def _run_update(self, backend: str, *, missing_records: dict[str, str] | None, popen_outputs: list[str] | None = None, manifest_version: str = "2026.08.1", on_pip=None, manifest=None, probe=None):
+    def _run_update(self, backend: str, *, missing_records: dict[str, str] | None, popen_outputs: list[str] | None = None, manifest_version: str = "2026.08.1", on_pip=None, manifest=None, probe=None, repair_dependencies: bool = False):
         env_dir, python_path = self._make_env(backend, manifest_version=manifest_version)
         outputs = popen_outputs or ["metadata repaired\n", "upgrade complete\n"]
         popen_calls: list[list[str]] = []
@@ -126,7 +126,13 @@ class RuntimeCoreUpdateTests(unittest.TestCase):
              mock.patch.object(worker_bootstrap.subprocess, "Popen", side_effect=popen), \
              mock.patch.object(sys, "platform", "win32"), \
              contextlib.redirect_stdout(io.StringIO()) as output:
-            result = worker_bootstrap.cmd_update_runtime_core({"backend": backend, "mirror": "pypi", "pythonPath": str(python_path), "taskId": "core-update"})
+            result = worker_bootstrap.cmd_update_runtime_core({
+                "backend": backend,
+                "mirror": "pypi",
+                "pythonPath": str(python_path),
+                "taskId": "core-update",
+                "repairDependencies": repair_dependencies,
+            })
 
         self.events = [json.loads(line) for line in output.getvalue().splitlines()]
         return result, popen_calls, env_dir, python_path
@@ -202,6 +208,63 @@ class RuntimeCoreUpdateTests(unittest.TestCase):
         self.assertFalse((env_dir / ".pymss-core-update-constraints.txt").exists())
         state = json.loads((env_dir / "pymss-runtime-state.json").read_text(encoding="utf-8"))
         self.assertEqual(state["pymssVersion"], "2.1.4")
+        self.assertEqual(state["manifestVersion"], "2026.09.1")
+
+    def test_dependency_repair_reinstalls_manifest_packages_without_reinstalling_torch(self):
+        constraints = []
+        manifest = _manifest()
+        manifest["common"]["pymss"] = "pymss[proxy]>=2.1.3"
+        probe = _probe_result("cpu")
+        probe["pymssVersion"] = "2.1.3"
+        probe["packageVersions"] = {**probe["packageVersions"], "pymss": "2.1.3"}
+
+        def capture_constraints():
+            if constraints:
+                return
+            path = self.envs_dir / "cpu" / ".pymss-core-update-constraints.txt"
+            constraints.extend(path.read_text(encoding="utf-8").splitlines())
+
+        result, commands, env_dir, python_path = self._run_update(
+            "cpu",
+            missing_records={},
+            manifest_version="2026.09.1",
+            on_pip=capture_constraints,
+            manifest=manifest,
+            probe=probe,
+            repair_dependencies=True,
+        )
+
+        self.assertEqual(result, 0)
+        self.assertEqual(len(commands), 2)
+        force_command, resolve_command = commands
+        self.assertEqual(force_command[0], str(python_path))
+        self.assertIn("--force-reinstall", force_command)
+        self.assertIn("--no-deps", force_command)
+        self.assertNotIn("--force-reinstall", resolve_command)
+        for requirement in ("av", "librosa", "numpy", "pymss[proxy]==2.1.3", "pymss-core==0.1.6"):
+            self.assertIn(requirement, force_command)
+            self.assertIn(requirement, resolve_command)
+        self.assertFalse(any(value.startswith("torch") for value in force_command))
+        self.assertIn("torch==2.7.1", constraints)
+        self.assertEqual(
+            [event["payload"]["stage"] for event in self.events if event["type"] == "runtime_core_update_stage"],
+            ["prepare", "repair", "repair-resolve", "verify"],
+        )
+        self.assertIn("Runtime dependency reinstall completed", (env_dir / "pymss-core-update.log").read_text(encoding="utf-8"))
+        state = json.loads((env_dir / "pymss-runtime-state.json").read_text(encoding="utf-8"))
+        self.assertEqual(state["pymssVersion"], "2.1.3")
+
+    def test_dependency_repair_can_recover_a_legacy_runtime_without_manifest_metadata(self):
+        result, commands, env_dir, _python_path = self._run_update(
+            "cpu",
+            missing_records={},
+            manifest_version="",
+            repair_dependencies=True,
+        )
+
+        self.assertEqual(result, 0)
+        self.assertEqual(len(commands), 2)
+        state = json.loads((env_dir / "pymss-runtime-state.json").read_text(encoding="utf-8"))
         self.assertEqual(state["manifestVersion"], "2026.09.1")
 
     def test_update_core_uses_bundled_pip_parser_without_external_packaging(self):
@@ -363,7 +426,7 @@ class RuntimeCoreUpdateTests(unittest.TestCase):
             "2.1.3",
         )
 
-    def test_failed_update_preserves_environment_and_state_without_rolling_back_packages(self):
+    def test_failed_update_preserves_environment_and_state_for_dependency_repair(self):
         env_dir, python_path = self._make_env("cpu")
         marker = env_dir / "keep-me.txt"
         marker.write_text("original", encoding="utf-8")
@@ -372,8 +435,8 @@ class RuntimeCoreUpdateTests(unittest.TestCase):
 
         def popen(command, **kwargs):
             del kwargs
-            # Pip can fail after writing a package. Retain those files for a retry;
-            # never replace or remove the active environment on this error path.
+            # Pip can fail after partially changing the active environment. Keep the
+            # directory and previous metadata so the dependency repair action can retry.
             (Path(command[0]).parent.parent / "partial-package.py").write_text("updated", encoding="utf-8")
             return mock.Mock(
                 stdout=iter(["pip failed\n"]),
@@ -406,6 +469,21 @@ class RuntimeCoreUpdateTests(unittest.TestCase):
         self.assertFalse((env_dir / ".pymss-core-update-constraints.txt").exists())
         self.assertFalse((self.envs_dir / ".cpu.core-updating").exists())
         self.assertFalse((self.envs_dir / ".cpu.core-backup").exists())
+
+    def test_legacy_cancelled_staging_is_discarded_without_touching_active_environment(self):
+        env_dir, _python_path = self._make_env("cpu")
+        marker = env_dir / "active-package.py"
+        marker.write_text("original", encoding="utf-8")
+        staging = self.envs_dir / ".cpu.core-updating"
+        staging.mkdir()
+        (staging / "partial-package.py").write_text("partial", encoding="utf-8")
+
+        with mock.patch.object(worker_bootstrap, "RUNTIME_ENVS_DIR", self.envs_dir), \
+             mock.patch.object(worker_bootstrap, "_manifest", return_value=_manifest()):
+            worker_bootstrap._recover_core_update_transactions()
+
+        self.assertEqual(marker.read_text(encoding="utf-8"), "original")
+        self.assertFalse(staging.exists())
 
     def test_interrupted_core_swap_restores_backup_when_final_directory_is_missing(self):
         env_dir, _python_path = self._make_env("cpu")

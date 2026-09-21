@@ -142,6 +142,7 @@ export const useAppStore = defineStore('app', () => {
   const runtimeCoreUpdateTaskId = ref<string | null>(null)
   const runtimeCoreUpdateStatus = ref<'idle' | 'updating' | 'success' | 'error' | 'cancelled'>('idle')
   const runtimeCoreUpdateMessage = ref('')
+  const runtimeCoreUpdateMode = ref<'update' | 'repair'>('update')
   const runtimeEnvSizes = ref<Record<string, number>>({})
   const runtimeEnvSizesLoading = ref(false)
   // Backends whose venv exists but never finished installing — leftover disk usage the user
@@ -472,12 +473,13 @@ export const useAppStore = defineStore('app', () => {
     backend: RuntimeBackend,
     mirror = 'auto',
     locale = '',
-    target: { pythonPath?: string } = {},
+    target: { pythonPath?: string; repairDependencies?: boolean } = {},
   ) {
     const taskId = `runtime_core_update_${crypto.randomUUID()}`
     runtimeCoreUpdateTaskId.value = taskId
     runtimeCoreUpdateStatus.value = 'updating'
     runtimeCoreUpdateMessage.value = ''
+    runtimeCoreUpdateMode.value = target.repairDependencies ? 'repair' : 'update'
     try {
       await startRuntimeBackground('start_runtime_core_update', taskId, { taskId, backend, mirror, locale, ...target }, 'runtime_core_update_finished')
     } catch (error) {
@@ -568,6 +570,7 @@ export const useAppStore = defineStore('app', () => {
         void loadRuntimeCoreVersions()
       } else if (event?.type === 'runtime_core_update_started') {
         runtimeCoreUpdateStatus.value = 'updating'
+        runtimeCoreUpdateMode.value = event.payload?.mode === 'repair' ? 'repair' : 'update'
         runtimeCoreUpdateMessage.value = event.payload?.backend || ''
         if (event.payload?.logPath) runtimeInfo.value = { ...(runtimeInfo.value || {}), logPath: event.payload.logPath }
       } else if (event?.type === 'runtime_core_update_stage' || event?.type === 'runtime_core_update_log') {
@@ -645,6 +648,7 @@ export const useAppStore = defineStore('app', () => {
     runtimeCoreUpdateTaskId,
     runtimeCoreUpdateStatus,
     runtimeCoreUpdateMessage,
+    runtimeCoreUpdateMode,
     runtimeEnvSizes,
     runtimeEnvSizesLoading,
     runtimeIncompleteBackends,

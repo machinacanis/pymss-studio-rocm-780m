@@ -2510,6 +2510,7 @@ version = "0.0.12"
 dependencies = [
  "base64 0.22.1",
  "chrono",
+ "libc",
  "minisign-verify",
  "reqwest",
  "semver",

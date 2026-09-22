@@ -275,6 +275,21 @@ test('prefixed legacy custom separator layouts migrate for both output variants'
   }
 })
 
+test('custom separator architecture choices survive editing and reload', () => {
+  for (const suffix of ['', '_list']) {
+    for (const architecture of ['auto', 'bs_conformer', 'mel_band_conformer']) {
+      const graph = new LGraph()
+      const node = LiteGraph.createNode(`pymss_custom_mss_separate${suffix}`)
+      graph.add(node)
+      const widget = node.widgets.find(w => w.name === 'model_type')
+      assert.ok(widget.options.values.includes(architecture))
+      widget.value = architecture
+      const restored = load(exportGraph(graph)).getNodeById(node.id)
+      assert.equal(restored.widgets.find(w => w.name === 'model_type').value, architecture)
+    }
+  }
+})
+
 test('ensemble algorithm, all weights and audio connections survive editing and reload', () => {
   const source = fixture('example_ensemble')
   const ensemble = source.nodes.find(node => node.type === 'pymss_audio_ensemble')

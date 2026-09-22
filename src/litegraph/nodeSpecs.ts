@@ -194,7 +194,7 @@ export const NODE_SPECS: Record<string, NodeSpec> = {
     dynamicStems: true,
     widgets: [
       { name: 'model_name', type: 'combo', default: '', options: [] },
-      { name: 'model_type', type: 'combo', default: 'mel_band_roformer', options: ['mel_band_roformer', 'bs_roformer', 'bs_roformer_hyperace', 'mdx23c', 'htdemucs', 'apollo', 'bandit', 'bandit_v2', 'scnet'] },
+      { name: 'model_type', type: 'combo', default: 'mel_band_roformer', options: ['auto', 'mel_band_roformer', 'bs_roformer', 'bs_roformer_hyperace', 'bs_conformer', 'mel_band_conformer', 'mdx23c', 'htdemucs', 'apollo', 'bandit', 'bandit_v2', 'scnet'] },
       { name: 'device', type: 'combo', default: 'auto', options: ['auto', 'cpu', 'cuda', 'mps'] },
       { name: 'device_ids', type: 'text', default: '0' },
       { name: 'debug', type: 'toggle', default: false },

@@ -598,9 +598,10 @@ def resolve_default_inference_params(entry: Any, model_path: Path, config_path: 
     batch_size = _as_int(inference.get("batch_size"))
     overlap_size = _as_int(inference.get("overlap_size"))
     num_overlap = _as_int(inference.get("num_overlap"))
-    chunk_size = _as_int(audio.get("chunk_size"))
+    # Match pymss's MSST compatibility: inference settings override audio defaults.
+    chunk_size = _as_int(inference.get("chunk_size"))
     if chunk_size is None:
-        chunk_size = _as_int(inference.get("chunk_size"))
+        chunk_size = _as_int(audio.get("chunk_size"))
     normalize = _as_bool(inference.get("normalize"))
 
     if batch_size is not None:

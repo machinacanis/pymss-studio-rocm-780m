@@ -675,10 +675,11 @@ def _enrich_inference_params_for_model(
     config_overlap_size = _as_int(inference.get('overlap_size'))
     config_num_overlap = _as_int(inference.get('num_overlap'))
     chunk_size = _as_int(params.get('chunk_size'))
-    if chunk_size is None:
-        chunk_size = _as_int(audio.get('chunk_size'))
+    # Use pymss's effective chunk size before converting the MSST overlap count.
     if chunk_size is None:
         chunk_size = _as_int(inference.get('chunk_size'))
+    if chunk_size is None:
+        chunk_size = _as_int(audio.get('chunk_size'))
 
     if explicit_overlap_size is None:
         derived_overlap_size: int | None = None

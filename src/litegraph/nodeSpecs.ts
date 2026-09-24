@@ -120,8 +120,8 @@ export const NODE_SPECS: Record<string, NodeSpec> = {
     outputs: [{ name: 'mss_params', type: PORT.MSS_PARAMS }],
     widgets: [
       { name: 'batch_size', type: 'number', default: 1 },
-      { name: 'overlap_size', type: 'combo', default: 'Default', options: ['Default', '256', '512', '1024', '2048', '4096', '8192'] },
-      { name: 'chunk_size', type: 'combo', default: 'Default', options: ['Default', 'Default', '256', '512', '1024', '2048', '4096', '8192'] },
+      { name: 'overlap_size', type: 'text', default: 'Default' },
+      { name: 'chunk_size', type: 'text', default: 'Default' },
       { name: 'normalize', type: 'toggle', default: false },
       { name: 'enable_tta', type: 'toggle', default: false },
       { name: 'standardize', type: 'toggle', default: false },
@@ -217,7 +217,7 @@ export const NODE_SPECS: Record<string, NodeSpec> = {
     outputs: [],
     widgets: [
       { name: 'output_format', type: 'combo', default: 'wav', options: ['wav', 'flac', 'mp3', 'm4a'] },
-      { name: 'sample_rate', type: 'combo', default: '44100', options: ['32000', '44100', '48000', '88200', '96000'] },
+      { name: 'sample_rate', type: 'combo', default: '44100', options: ['32000', '44100', '48000'] },
       { name: 'wav_bit_depth', type: 'combo', default: 'FLOAT', options: ['FLOAT', 'PCM_24', 'PCM_16'] },
       { name: 'flac_bit_depth', type: 'combo', default: 'PCM_24', options: ['PCM_24', 'PCM_16'] },
       { name: 'mp3_bit_rate', type: 'combo', default: '320k', options: ['128k', '192k', '256k', '320k'] },

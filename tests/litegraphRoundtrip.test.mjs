@@ -22,6 +22,7 @@ const {
   NODE_SPECS,
   BUILTIN_SPECS,
   localizePymssNode,
+  setSeparateStems,
   setPymssNodeTranslator,
 } = await vite.ssrLoadModule('/src/litegraph/registerNodes.ts')
 const adapter = await vite.ssrLoadModule('/src/litegraph/graphAdapter.ts')
@@ -90,6 +91,43 @@ test('configurable builtin nodes expose runtime-compatible widget layouts', () =
     assert.deepEqual(node.widgets.map(widget => widget.name), widgets, type)
   }
   assert.deepEqual(LiteGraph.createNode('SaveAudioAdvanced').outputs.map(output => output.name), ['audio'])
+})
+
+test('MSS params accept model defaults and unrestricted positive integer overrides', () => {
+  const graph = new LGraph()
+  const node = LiteGraph.createNode('pymss_mss_params')
+  graph.add(node)
+  const overlap = node.widgets.find(widget => widget.name === 'overlap_size')
+  const chunk = node.widgets.find(widget => widget.name === 'chunk_size')
+
+  assert.equal(overlap.type, 'text')
+  assert.equal(chunk.type, 'text')
+  assert.equal(overlap.value, 'Default')
+  assert.equal(chunk.value, 'Default')
+
+  overlap.value = '48000'
+  chunk.value = '485100'
+  const restored = load(exportGraph(graph)).nodes[0]
+  assert.equal(restored.widgets.find(widget => widget.name === 'overlap_size').value, '48000')
+  assert.equal(restored.widgets.find(widget => widget.name === 'chunk_size').value, '485100')
+})
+
+test('save audio sample-rate choices stop at 48 kHz', () => {
+  const node = LiteGraph.createNode('pymss_save_audio')
+  const sampleRate = node.widgets.find(widget => widget.name === 'sample_rate')
+  assert.deepEqual(sampleRate.options.values, ['32000', '44100', '48000'])
+})
+
+test('separate nodes shrink after switching from six stems to two', () => {
+  const node = LiteGraph.createNode('mss_separate')
+  setSeparateStems(node, ['vocals', 'drums', 'bass', 'guitar', 'piano', 'other'])
+  const expandedHeight = node.size[1]
+
+  setSeparateStems(node, ['vocals', 'instrumental'])
+
+  assert.ok(node.size[1] < expandedHeight)
+  assert.equal(node.size[1], node.computeSize()[1])
+  assert.equal(node.outputs.length, 4)
 })
 
 test('legacy Studio builtin widget layouts migrate without shifting values', () => {

@@ -247,6 +247,7 @@ export function setSeparateStems(node: LGraphNodeType, stems: string[]) {
     }
   }
   n.stems = list
+  n.setSize([n.size[0], n.computeSize()[1]])
   localizePymssNode(n)
 }
 

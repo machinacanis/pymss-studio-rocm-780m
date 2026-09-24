@@ -237,6 +237,23 @@ def _prepare_simple_runtime_definition(definition: dict[str, Any]) -> dict[str, 
     # ``ensembles`` is a Studio simple-workflow extension. The worker compiles
     # it into DAG nodes after pymss has parsed the native linear YAML subset.
     transient.pop("ensembles", None)
+    raw_ensembles = definition.get("ensembles")
+    ensemble_outputs = {
+        f"{str(ensemble.get('id') or '').strip()}.{str(ensemble.get('output_stem') or '').strip()}".casefold()
+        for ensemble in (raw_ensembles if isinstance(raw_ensembles, list) else [])
+        if isinstance(ensemble, dict)
+        and str(ensemble.get("id") or "").strip()
+        and str(ensemble.get("output_stem") or "").strip()
+    }
+    # pymss' native YAML compiler does not know about Studio Ensemble records.
+    # Give downstream steps a valid temporary input, then reconnect their slot
+    # to the generated Ensemble node in _apply_simple_ensembles.
+    for step in transient.get("steps", []):
+        if not isinstance(step, dict):
+            continue
+        input_ref = str(step.get("input") or "").strip().casefold()
+        if input_ref in ensemble_outputs:
+            step["input"] = "input"
     # Saving is controlled solely by explicit save-node links. Older
     # definitions may still carry the retired global switch; ignore it.
     transient.pop("save_intermediate", None)
@@ -455,6 +472,7 @@ def _apply_simple_ensembles(dag: Any, definition: dict[str, Any], *, input_path:
     output_index = start_index
     output_metadata: list[dict[str, str]] = []
     used_ids = {str(node.id) for node in dag.nodes}
+    ensemble_outputs: dict[str, tuple[str, int]] = {}
 
     for ensemble_index, raw in enumerate(raw_ensembles, 1):
         if not isinstance(raw, dict):
@@ -514,6 +532,9 @@ def _apply_simple_ensembles(dag: Any, definition: dict[str, Any], *, input_path:
             data={"widgets_values": [len(links), algorithm, *weights]},
             title=ensemble_id,
         ))
+        output_ref = f"{ensemble_id}.{output_stem}".casefold()
+        produced[output_ref] = (node_id, 0)
+        ensemble_outputs[output_ref] = (node_id, 0)
 
         save_target = raw.get("save")
         if save_target in (None, False, ""):
@@ -566,6 +587,33 @@ def _apply_simple_ensembles(dag: Any, definition: dict[str, Any], *, input_path:
             data={"widgets_values": [output_format, "Default", "44100", "FLOAT", "PCM_24", "320k"]},
             title=save_id,
         ))
+
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        source_ref = str(step.get("input") or "").strip().casefold()
+        produced_source = ensemble_outputs.get(source_ref)
+        if produced_source is None:
+            continue
+        step_id = str(step.get("id") or "").strip()
+        target_node_id = f"step:{step_id}"
+        target_node = next((node for node in dag.nodes if str(node.id) == target_node_id), None)
+        if target_node is None:
+            raise RuntimeError(f"Ensemble output target step is missing: {step_id}")
+        if not isinstance(target_node.inputs, list):
+            target_node.inputs = list(target_node.inputs or [])
+        while len(target_node.inputs) <= 0:
+            target_node.inputs.append(None)
+        source_node_id, source_slot = produced_source
+        target_node.inputs[0] = graph.DAGLink(
+            link_id=next_link_id,
+            source_node_id=source_node_id,
+            source_slot=source_slot,
+            target_node_id=target_node_id,
+            target_slot=0,
+            type=graph.AUDIO,
+        )
+        next_link_id += 1
 
     return output_metadata
 

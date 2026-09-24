@@ -49,6 +49,7 @@ const {
   simpleOutputRef,
   simpleSaveTarget,
   simpleStepInputTarget,
+  updateSimpleEnsembleOutputStem,
 } = await vite.ssrLoadModule('/src/utils/simpleWorkflowEditor.ts')
 
 function simpleFixture() {
@@ -351,6 +352,7 @@ test('simple editor round-trips Ensemble nodes and validates their connections',
     steps: [
       { id: 'modelA', model: 'a.ckpt', input: 'input', stems: ['Vocals'], save: {}, output_names: {} },
       { id: 'modelB', model: 'b.ckpt', input: 'input', stems: ['Vocals'], save: {}, output_names: {} },
+      { id: 'cleanup', model: 'cleanup.ckpt', input: 'input', stems: ['Voice'], save: { Voice: 'Default' }, output_names: {} },
     ],
     ensembles: [{
       id: 'blend',
@@ -360,7 +362,7 @@ test('simple editor round-trips Ensemble nodes and validates their connections',
       ],
       algorithm: 'avg_fft',
       output_stem: 'Vocals',
-      save: 'Default',
+      save: false,
       output_name: '%filename%_%stem%_Ensemble',
     }],
   }
@@ -376,6 +378,10 @@ test('simple editor round-trips Ensemble nodes and validates their connections',
   )
   assert.equal(canConnectSimple(draft, 'blend.Vocals', 'save').ok, true)
   assert.equal(canConnectSimple(draft, 'blend.Vocals', simpleStepInputTarget('modelB')).ok, false)
+  assert.equal(canConnectSimple(draft, 'blend.Vocals', simpleStepInputTarget('cleanup')).ok, true)
+  connectSimple(draft, 'blend.Vocals', simpleStepInputTarget('cleanup'))
+  cleanupSimpleDraft(draft)
+  assert.equal(draft.steps[2].input, 'blend.Vocals')
   assert.equal(countWorkflowSaveOutputs(definition), 1)
   assert.deepEqual(analyzeSimpleWorkflow(definition), { editable: true, reasonCodes: [] })
 
@@ -388,12 +394,34 @@ test('simple editor round-trips Ensemble nodes and validates their connections',
 
   const rebuilt = buildSimpleWorkflowDefinition(draft)
   assert.deepEqual(rebuilt.ensembles, definition.ensembles)
+  assert.equal(rebuilt.steps[2].input, 'blend.Vocals')
+  assert.equal(getWorkflowDefinitionIssue(rebuilt), null)
   assert.equal(rebuilt.studio.nodes.blend.x, draft.ui.nodes.blend.x)
+
+  updateSimpleEnsembleOutputStem(draft, draft.ensembles[0], '')
+  assert.equal(draft.steps[2].input, 'blend.Vocals')
+  cleanupSimpleDraft(draft)
+  assert.equal(draft.steps[2].input, 'blend.Vocals')
+  updateSimpleEnsembleOutputStem(draft, draft.ensembles[0], 'Lead')
+  assert.equal(draft.steps[2].input, 'blend.Lead')
+  assert.equal(canConnectSimple(draft, 'blend.Lead', simpleStepInputTarget('cleanup')).ok, true)
+  const rebuiltAfterRename = buildSimpleWorkflowDefinition(draft)
+  assert.equal(rebuiltAfterRename.ensembles[0].output_stem, 'Lead')
+  assert.equal(rebuiltAfterRename.steps[2].input, 'blend.Lead')
+  assert.equal(getWorkflowDefinitionIssue(rebuiltAfterRename), null)
+
+  const cyclic = structuredClone(rebuilt)
+  cyclic.steps[1].input = 'blend.Vocals'
+  assert.equal(getWorkflowDefinitionIssue(cyclic), 'invalid-definition')
 
   draft.steps.splice(0, 1)
   cleanupSimpleDraft(draft)
   assert.equal(draft.ensembles[0].inputs[0].source, 'input')
   assert.equal(draft.ensembles[0].inputs[1].source, 'modelB.Vocals')
+  assert.equal(draft.steps[1].input, 'blend.Lead')
+  draft.ensembles = []
+  cleanupSimpleDraft(draft)
+  assert.equal(draft.steps[1].input, '')
 })
 
 test('simple runtime preparation materializes defaults without mutating the stored workflow', () => {

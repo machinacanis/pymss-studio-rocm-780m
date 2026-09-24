@@ -435,9 +435,13 @@ export const BUILTIN_SPECS: Record<string, NodeSpec> = {
       { name: 'audio1', type: PORT.AUDIO },
       { name: 'audio2', type: PORT.AUDIO },
       { name: 'merge_method', type: PORT.COMBO, widget: { name: 'merge_method' } },
+      { name: 'normalize', type: PORT.BOOLEAN, widget: { name: 'normalize' }, shape: 7 },
     ],
     outputs: [{ name: 'audio', type: PORT.AUDIO }],
-    widgets: [{ name: 'merge_method', type: 'combo', default: 'add', options: ['add', 'subtract', 'multiply', 'average'] }],
+    widgets: [
+      { name: 'merge_method', type: 'combo', default: 'add', options: ['add', 'subtract', 'multiply', 'average'] },
+      { name: 'normalize', type: 'toggle', default: true },
+    ],
   },
   AudioAdjustVolume: {
     type: 'AudioAdjustVolume',

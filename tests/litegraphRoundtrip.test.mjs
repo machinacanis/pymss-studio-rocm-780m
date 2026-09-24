@@ -118,6 +118,40 @@ test('legacy Studio builtin widget layouts migrate without shifting values', () 
   }
 })
 
+test('legacy AudioMerge graphs retain peak protection and their merge method', () => {
+  for (const method of ['add', 'subtract', 'mean', 'average']) {
+    const graph = new LGraph()
+    graph.add(LiteGraph.createNode('AudioMerge'))
+    const source = exportGraph(graph)
+    source.nodes[0].widgets_values = [method]
+    source.nodes[0].inputs = source.nodes[0].inputs.filter(input => input.name !== 'normalize')
+    delete source.nodes[0].properties.normalize
+
+    const restored = load(source)
+    assert.deepEqual(restored.nodes[0].widgets.map(widget => widget.value), [method, true])
+    assert.deepEqual(exportGraph(restored).nodes[0].widgets_values, [method, true])
+  }
+})
+
+test('AudioMerge normalization toggle survives editing, export and reload', () => {
+  const graph = new LGraph()
+  const merge = LiteGraph.createNode('AudioMerge')
+  graph.add(merge)
+  const normalize = merge.widgets.find(widget => widget.name === 'normalize')
+  assert.equal(normalize.value, true)
+  assert.deepEqual(merge.inputs.map(input => input.name), ['audio1', 'audio2', 'merge_method', 'normalize'])
+  assert.equal(merge.inputs[3].type, 'BOOLEAN')
+  merge.widgets[0].setValue('subtract', { e: undefined, node: merge, canvas: { graph_mouse: [0, 0] } })
+  normalize.setValue(false, { e: undefined, node: merge, canvas: { graph_mouse: [0, 0] } })
+
+  const exported = exportGraph(graph)
+  assert.deepEqual(exported.nodes[0].widgets_values, ['subtract', false])
+  assert.equal(exported.nodes[0].properties.normalize, false)
+  const restored = load(exported)
+  assert.deepEqual(restored.nodes[0].widgets.map(widget => widget.value), ['subtract', false])
+  assert.deepEqual(exportGraph(restored).nodes[0].widgets_values, ['subtract', false])
+})
+
 test('advanced editor labels follow locale without changing workflow data', () => {
   const source = fixture('example_mss_separate')
   const en = translator('en')

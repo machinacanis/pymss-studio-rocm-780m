@@ -28,6 +28,7 @@ import {
   simpleOutputRef,
   simpleSaveTarget,
   simpleStepInputTarget,
+  updateSimpleEnsembleOutputStem,
 } from '@/utils/simpleWorkflowEditor'
 
 const draft = defineModel<SimpleDraft>('draft', { required: true })
@@ -141,6 +142,25 @@ const ensembleSourceOptions = computed(() => [
   { value: 'input', label: t('workflows.originalInput') },
   ...stepOutputOptions.value,
 ])
+
+function stepInputOptions(step: SimpleStepDraft, index: number) {
+  const options = [
+    { label: t('workflows.originalInput'), value: 'input' },
+    ...draft.value.steps.slice(0, index).flatMap(source => source.stems.map(stem => ({
+      label: `${source.model || source.id} · ${stem}`,
+      value: simpleOutputRef(source.id, stem),
+    }))),
+    ...draft.value.ensembles.flatMap(ensemble => {
+      const stem = ensemble.outputStem.trim()
+      if (!stem) return []
+      const value = simpleOutputRef(ensemble.id, stem)
+      return canConnectSimple(draft.value, value, simpleStepInputTarget(step.id)).ok
+        ? [{ label: `${t('workflows.ensembleNode')} · ${stem}`, value }]
+        : []
+    }),
+  ]
+  return options
+}
 
 function ensembleSourceLabel(source: string) {
   if (source === 'input') return t('workflows.originalInput')
@@ -725,7 +745,7 @@ function updateEnsembleAlgorithm(ensemble: SimpleEnsembleDraft, value: string) {
 }
 
 function updateEnsembleStem(ensemble: SimpleEnsembleDraft, value: string) {
-  ensemble.outputStem = value
+  updateSimpleEnsembleOutputStem(draft.value, ensemble, value)
   scheduleLayoutRefresh()
   recordHistory()
 }
@@ -1051,7 +1071,7 @@ onBeforeUnmount(() => {
           </div>
           <div class="simple-node__body" @pointerdown.stop>
             <label><span>{{ t('workflows.stepModel') }}</span><n-select :ref="(instance: unknown) => setSelectInstance(`step-model:${step.id}`, instance)" :value="step.model" size="small" filterable :options="modelOptions" :placeholder="t('workflows.stepModelPlaceholder')" @update:value="updateModel(step, $event)" /></label>
-            <label><span>{{ t('workflows.stepInput') }}</span><n-select :ref="(instance: unknown) => setSelectInstance(`step-input:${step.id}`, instance)" :value="step.input" size="small" :options="[{ label: t('workflows.originalInput'), value: 'input' }, ...draft.steps.slice(0, index).flatMap(source => source.stems.map(stem => ({ label: `${source.model || source.id} · ${stem}`, value: simpleOutputRef(source.id, stem) })))]" @update:value="updateStepInput(step, String($event || ''))" /></label>
+            <label><span>{{ t('workflows.stepInput') }}</span><n-select :ref="(instance: unknown) => setSelectInstance(`step-input:${step.id}`, instance)" :value="step.input" size="small" :options="stepInputOptions(step, index)" @update:value="updateStepInput(step, String($event || ''))" /></label>
           </div>
           <div class="simple-node__outputs">
             <div v-for="stem in step.stems" :key="stem" class="simple-output-row">

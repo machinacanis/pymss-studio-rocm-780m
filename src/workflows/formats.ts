@@ -79,19 +79,43 @@ export function hasInvalidSimpleStructure(definition: Record<string, unknown>): 
     ))
   })
   if (hasInvalidEnsemble) return true
-  const availableOutputs = new Set(['input', ...(definition.steps as unknown[]).flatMap((value) => {
-    if (!isRecord(value) || typeof value.id !== 'string' || !Array.isArray(value.stems)) return []
+  const stepOutputIndexes = new Map<string, number>()
+  ;(definition.steps as unknown[]).forEach((value, index) => {
+    if (!isRecord(value) || typeof value.id !== 'string' || !Array.isArray(value.stems)) return
     const stepId = value.id.trim()
-    return value.stems
+    value.stems
       .filter(stem => typeof stem === 'string' && stem.trim())
-      .map(stem => `${stepId}.${String(stem).trim()}`.toLowerCase())
-  })])
+      .forEach(stem => stepOutputIndexes.set(`${stepId}.${String(stem).trim()}`.toLowerCase(), index))
+  })
+  const availableEnsembleInputs = new Set(['input', ...stepOutputIndexes.keys()])
   if (ensembles.some((value) => {
     if (!isRecord(value) || !Array.isArray(value.inputs)) return true
     const sources = value.inputs.map(input => isRecord(input) && typeof input.source === 'string'
       ? input.source.trim().toLowerCase()
       : '')
-    return sources.some(source => !availableOutputs.has(source)) || new Set(sources).size !== sources.length
+    return sources.some(source => !availableEnsembleInputs.has(source)) || new Set(sources).size !== sources.length
+  })) return true
+  const ensembleOutputs = new Map(ensembles.flatMap(value => (
+    isRecord(value) && typeof value.id === 'string' && typeof value.output_stem === 'string'
+      ? [[`${value.id.trim()}.${value.output_stem.trim()}`.toLowerCase(), value] as const]
+      : []
+  )))
+  if ((definition.steps as unknown[]).some((value, targetIndex) => {
+    if (!isRecord(value)) return true
+    if (value.input != null && typeof value.input !== 'string') return true
+    const input = typeof value.input === 'string' ? value.input.trim().toLowerCase() : 'input'
+    if (input === 'input') return false
+    const sourceIndex = stepOutputIndexes.get(input)
+    if (sourceIndex !== undefined) return sourceIndex >= targetIndex
+    const ensemble = ensembleOutputs.get(input)
+    if (!ensemble || !Array.isArray(ensemble.inputs)) return true
+    return ensemble.inputs.some((ensembleInput) => {
+      if (!isRecord(ensembleInput) || typeof ensembleInput.source !== 'string') return true
+      const dependency = ensembleInput.source.trim().toLowerCase()
+      if (dependency === 'input') return false
+      const dependencyIndex = stepOutputIndexes.get(dependency)
+      return dependencyIndex === undefined || dependencyIndex >= targetIndex
+    })
   })) return true
   const ids = [
     ...(definition.steps as unknown[]).flatMap(value => isRecord(value) && typeof value.id === 'string' ? [value.id.trim()] : []),

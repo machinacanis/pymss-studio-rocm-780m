@@ -42,6 +42,23 @@ export function simpleSourceStem(source: string): string {
   return separator > 0 ? source.slice(separator + 1) : ''
 }
 
+export function updateSimpleEnsembleOutputStem(
+  draft: SimpleDraft,
+  ensemble: SimpleEnsembleDraft,
+  value: string,
+): void {
+  const nextStem = value.trim()
+  ensemble.outputStem = value
+  if (!nextStem) return
+
+  const nextSource = simpleOutputRef(ensemble.id, nextStem)
+  draft.steps.forEach((step) => {
+    if (simpleSourceStepId(step.input).toLowerCase() === ensemble.id.toLowerCase()) {
+      step.input = nextSource
+    }
+  })
+}
+
 type ResolvedSimpleSource =
   | { kind: 'step'; step: SimpleStepDraft; stem: string }
   | { kind: 'ensemble'; ensemble: SimpleEnsembleDraft; stem: string }
@@ -87,6 +104,18 @@ export function canConnectSimple(
     const targetIndex = draft.steps.findIndex(step => step.id === targetId)
     if (targetIndex < 0) return { ok: false, reason: 'missing-target' }
     if (rawSource === 'input') return { ok: true }
+    if (sourceValue?.kind === 'ensemble') {
+      for (const input of sourceValue.ensemble.inputs) {
+        const dependency = input.source.trim()
+        if (dependency === 'input') continue
+        const resolvedDependency = resolveSource(draft, dependency)
+        if (resolvedDependency?.kind !== 'step') return { ok: false, reason: 'invalid-source' }
+        const dependencyIndex = draft.steps.findIndex(step => step.id === resolvedDependency.step.id)
+        if (dependencyIndex < 0) return { ok: false, reason: 'invalid-source' }
+        if (dependencyIndex >= targetIndex) return { ok: false, reason: 'forward-link' }
+      }
+      return { ok: true }
+    }
     if (sourceValue?.kind !== 'step') return { ok: false, reason: 'invalid-source' }
     const sourceId = simpleSourceStepId(rawSource)
     const sourceIndex = draft.steps.findIndex(step => step.id === sourceId)
@@ -186,34 +215,6 @@ export function disconnectSimple(draft: SimpleDraft, target: SimpleConnectionTar
 
 export function cleanupSimpleDraft(draft: SimpleDraft): void {
   if (!Array.isArray(draft.ensembles)) draft.ensembles = []
-  const stepIndexes = new Map(draft.steps.map((step, index) => [step.id, index]))
-  draft.steps.forEach((step, index) => {
-    const input = step.input.trim()
-    if (input !== 'input') {
-      const sourceId = simpleSourceStepId(input)
-      const sourceStem = simpleSourceStem(input)
-      const sourceIndex = stepIndexes.get(sourceId)
-      if (sourceIndex === undefined || sourceIndex >= index) step.input = ''
-      else {
-        const source = draft.steps[sourceIndex]
-        if (!source.stems.some(stem => stem.toLowerCase() === sourceStem.toLowerCase())) step.input = ''
-      }
-    }
-    const saveByStem = new Map(Object.entries(step.save || {}).map(([stem, value]) => [stem.toLowerCase(), value]))
-    const nextSave: Record<string, string> = {}
-    step.stems.forEach((stem) => {
-      const value = saveByStem.get(stem.toLowerCase())
-      if (value?.trim()) nextSave[stem] = value
-    })
-    step.save = nextSave
-    const namesByStem = new Map(Object.entries(step.outputNames || {}).map(([stem, value]) => [stem.toLowerCase(), value]))
-    const nextNames: Record<string, string> = {}
-    step.stems.forEach((stem) => {
-      const value = namesByStem.get(stem.toLowerCase())
-      if (value?.trim()) nextNames[stem] = value
-    })
-    step.outputNames = nextNames
-  })
   draft.ensembles.forEach((ensemble) => {
     if (!SIMPLE_ENSEMBLE_ALGORITHMS.includes(ensemble.algorithm)) ensemble.algorithm = 'avg_wave'
     ensemble.outputStem = ensemble.outputStem.trim()
@@ -232,5 +233,32 @@ export function cleanupSimpleDraft(draft: SimpleDraft): void {
       }
     })
     while (ensemble.inputs.length < 2) ensemble.inputs.push({ source: '', weight: 1 })
+  })
+  draft.steps.forEach((step) => {
+    const input = step.input.trim()
+    const sourceId = simpleSourceStepId(input)
+    const hasPendingEnsembleSource = draft.ensembles.some(ensemble => (
+      !ensemble.outputStem
+      && ensemble.id.toLowerCase() === sourceId.toLowerCase()
+    ))
+    if (input !== 'input'
+      && !hasPendingEnsembleSource
+      && !canConnectSimple(draft, input, simpleStepInputTarget(step.id)).ok) {
+      step.input = ''
+    }
+    const saveByStem = new Map(Object.entries(step.save || {}).map(([stem, value]) => [stem.toLowerCase(), value]))
+    const nextSave: Record<string, string> = {}
+    step.stems.forEach((stem) => {
+      const value = saveByStem.get(stem.toLowerCase())
+      if (value?.trim()) nextSave[stem] = value
+    })
+    step.save = nextSave
+    const namesByStem = new Map(Object.entries(step.outputNames || {}).map(([stem, value]) => [stem.toLowerCase(), value]))
+    const nextNames: Record<string, string> = {}
+    step.stems.forEach((stem) => {
+      const value = namesByStem.get(stem.toLowerCase())
+      if (value?.trim()) nextNames[stem] = value
+    })
+    step.outputNames = nextNames
   })
 }

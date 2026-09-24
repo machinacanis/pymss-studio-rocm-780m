@@ -129,7 +129,10 @@ class WorkflowOutputMetadataTests(unittest.TestCase):
     def test_ensemble_metadata_is_removed_before_pymss_yaml_parsing(self) -> None:
         definition = {
             "version": 1,
-            "steps": [{"id": "split", "save": {}}],
+            "steps": [
+                {"id": "split", "input": "input", "save": {}},
+                {"id": "cleanup", "input": "blend.Vocals", "save": {}},
+            ],
             "ensembles": [{
                 "id": "blend",
                 "inputs": [{"source": "split.vocals", "weight": 1}, {"source": "split.music", "weight": 1}],
@@ -140,6 +143,8 @@ class WorkflowOutputMetadataTests(unittest.TestCase):
         }
         runtime = _prepare_simple_runtime_definition(definition)
         self.assertNotIn("ensembles", runtime)
+        self.assertEqual(runtime["steps"][1]["input"], "input")
+        self.assertEqual(definition["steps"][1]["input"], "blend.Vocals")
         self.assertIn("ensembles", definition)
         self.assertIsNot(runtime, definition)
 
@@ -167,12 +172,21 @@ class WorkflowOutputMetadataTests(unittest.TestCase):
             DAGNode(id="input", type="input_audio", inputs=[], data={}),
             DAGNode(id="step:modelA", type="mss_separate", inputs=[], data={}),
             DAGNode(id="step:modelB", type="mss_separate", inputs=[], data={}),
+            DAGNode(id="step:cleanup", type="mss_separate", inputs=[DAGLink(
+                link_id=7,
+                source_node_id="input",
+                source_slot=0,
+                target_node_id="step:cleanup",
+                target_slot=0,
+                type="AUDIO",
+            )], data={}),
             DAGNode(id="save:modelA:Vocals", type="pymss_save_audio", inputs=[None, None], data={}),
         ])
         definition = {
             "steps": [
                 {"id": "modelA", "model": "a.ckpt", "stems": ["Vocals"], "save": {"Vocals": "Default"}},
                 {"id": "modelB", "stems": ["Drums", "Vocals"]},
+                {"id": "cleanup", "input": "blend.Vocals", "stems": ["Voice"]},
             ],
             "ensembles": [{
                 "id": "blend",
@@ -211,6 +225,7 @@ class WorkflowOutputMetadataTests(unittest.TestCase):
 
         ensemble = next(node for node in dag.nodes if node.type == "pymss_audio_ensemble")
         save = next(node for node in dag.nodes if node.id == "studio:ensemble-save:blend")
+        cleanup = next(node for node in dag.nodes if node.id == "step:cleanup")
         filename = next(node for node in dag.nodes if node.type == "StringConstant")
         self.assertEqual(ensemble.data["widgets_values"], [2, "avg_fft", 1.0, 0.75])
         self.assertEqual(
@@ -218,10 +233,85 @@ class WorkflowOutputMetadataTests(unittest.TestCase):
             [("input", 0, 0), ("step:modelB", 2, 1)],
         )
         self.assertEqual(save.inputs[0].source_node_id, ensemble.id)
+        self.assertEqual(cleanup.inputs[0].source_node_id, ensemble.id)
+        self.assertEqual(cleanup.inputs[0].source_slot, 0)
+        self.assertEqual(cleanup.inputs[0].target_slot, 0)
         self.assertEqual(save.inputs[1].source_node_id, filename.id)
         self.assertEqual(filename.data["widgets_values"], ["Vocals_2"])
         self.assertEqual(step_metadata, [{"stem": "Vocals", "filename": ""}])
         self.assertEqual(ensemble_metadata, [{"stem": "Vocals", "filename": "Vocals_2.flac"}])
+
+    def test_unsaved_simple_ensemble_can_feed_a_downstream_step(self) -> None:
+        class DAGLink:
+            def __init__(self, **values):
+                self.__dict__.update(values)
+
+        class DAGNode:
+            def __init__(self, *, id, type, inputs, data, title=""):
+                self.id = id
+                self.type = type
+                self.inputs = inputs
+                self.data = data
+                self.title = title
+
+        graph_module = ModuleType("pymss.graph")
+        graph_module.DAGLink = DAGLink
+        graph_module.DAGNode = DAGNode
+        graph_module.AUDIO = "AUDIO"
+        graph_module.STRING = "STRING"
+        pymss_module = ModuleType("pymss")
+        pymss_module.graph = graph_module
+        dag = SimpleNamespace(nodes=[
+            DAGNode(id="input", type="input_audio", inputs=[], data={}),
+            DAGNode(id="step:first", type="mss_separate", inputs=[], data={}),
+            DAGNode(id="step:second", type="mss_separate", inputs=[], data={}),
+            DAGNode(id="step:cleanup", type="mss_separate", inputs=[DAGLink(
+                link_id=3,
+                source_node_id="input",
+                source_slot=0,
+                target_node_id="step:cleanup",
+                target_slot=0,
+                type="AUDIO",
+            )], data={}),
+        ])
+        definition = {
+            "steps": [
+                {"id": "first", "stems": ["Vocals"]},
+                {"id": "second", "stems": ["Vocals"]},
+                {"id": "cleanup", "input": "blend.Vocals", "stems": ["Voice"]},
+            ],
+            "ensembles": [{
+                "id": "blend",
+                "inputs": [
+                    {"source": "first.Vocals", "weight": 1},
+                    {"source": "second.Vocals", "weight": 0.5},
+                ],
+                "algorithm": "avg_wave",
+                "output_stem": "Vocals",
+                "save": False,
+            }],
+        }
+
+        with patch.dict("sys.modules", {"pymss": pymss_module, "pymss.graph": graph_module}):
+            metadata = _apply_simple_ensembles(
+                dag,
+                definition,
+                input_path="D:/Audio/song.wav",
+                output_format="wav",
+            )
+
+        ensemble = next(node for node in dag.nodes if node.id == "studio:ensemble:blend")
+        cleanup = next(node for node in dag.nodes if node.id == "step:cleanup")
+        self.assertEqual(metadata, [])
+        self.assertFalse(any(node.id == "studio:ensemble-save:blend" for node in dag.nodes))
+        self.assertEqual(cleanup.inputs[0].source_node_id, ensemble.id)
+        link_ids = [
+            link.link_id
+            for node in dag.nodes
+            for link in node.inputs
+            if link is not None
+        ]
+        self.assertEqual(len(link_ids), len(set(link_ids)))
 
     def test_simple_ensemble_rejects_non_finite_weights_in_worker(self) -> None:
         class DAGLink:

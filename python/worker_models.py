@@ -6,7 +6,7 @@ import platform
 import shutil
 import sys
 import traceback
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -85,27 +85,99 @@ class ModelEntry:
         )
 
 
+@dataclass(frozen=True)
+class RegisteredUserModelEntry:
+    """Lightweight reader for pymss's persisted custom-model registry.
+
+    Listing models is a startup path. Importing ``pymss.user_models`` first executes
+    ``pymss.__init__``, which imports the inference stack and Torch even though the registry is
+    just JSON. Keep this reader aligned with the stable on-disk fields and leave mutations to
+    pymss's public API.
+    """
+
+    name: str
+    model_type: str
+    model_path: str
+    config_path: str | None = None
+    aliases: tuple[str, ...] = ()
+    source: str = "user"
+    architecture: str = ""
+    supported: bool = True
+    unsupported_reason: str = ""
+    relpath: str = ""
+    config_relpath: str = ""
+    auxiliary_relpaths: tuple[str, ...] = ()
+    size_bytes: int = 0
+    primary_category: str = "user"
+    primary_category_cn: str = "用户"
+    secondary_category: str = "custom"
+    secondary_category_cn: str = "自定义"
+    target_stem: str = ""
+    inference_params: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def stem(self) -> str:
+        return Path(self.name).stem
+
+    @property
+    def category_path(self) -> str:
+        return "/".join(part for part in (self.primary_category, self.secondary_category) if part)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "RegisteredUserModelEntry":
+        name = str(data.get("name") or "").strip()
+        model_type = str(data.get("model_type") or "").strip()
+        model_path = str(data.get("model_path") or "").strip()
+        if not name or not model_type or not model_path:
+            raise ValueError("Invalid user model registry entry")
+        raw_aliases = data.get("aliases")
+        raw_params = data.get("inference_params")
+        return cls(
+            name=name,
+            model_type=model_type,
+            model_path=str(Path(model_path).expanduser()),
+            config_path=(str(Path(str(data["config_path"])).expanduser()) if data.get("config_path") else None),
+            aliases=(
+                tuple(str(alias) for alias in raw_aliases)
+                if isinstance(raw_aliases, (list, tuple))
+                else ()
+            ),
+            architecture=str(data.get("architecture") or model_type),
+            supported=bool(data.get("supported", True)),
+            unsupported_reason=str(data.get("unsupported_reason") or ""),
+            primary_category=str(data.get("primary_category") or "user"),
+            primary_category_cn=str(data.get("primary_category_cn") or "用户"),
+            secondary_category=str(data.get("secondary_category") or "custom"),
+            secondary_category_cn=str(data.get("secondary_category_cn") or "自定义"),
+            target_stem=str(data.get("target_stem") or ""),
+            inference_params=(dict(raw_params) if isinstance(raw_params, dict) else {}),
+        )
+
+
+@lru_cache(maxsize=1)
 def _model_catalog_path() -> Path:
     try:
+        # Reading the catalog must not execute pymss.__init__: that imports the inference stack
+        # and Torch, adding seconds to every app start merely to locate one JSON file.
+        from importlib.metadata import distribution
+
+        package = distribution("pymss")
+        for file in package.files or ():
+            if str(file).replace("\\", "/") == "pymss/resources/model_catalog.json":
+                catalog = Path(package.locate_file(file)).resolve()
+                if catalog.is_file():
+                    return catalog
+    except Exception:
+        pass
+    try:
+        # Source checkouts may be importable without installed distribution metadata.
         import pymss  # type: ignore
         package_dir = Path(pymss.__file__).resolve().parent
         direct = package_dir / "resources" / "model_catalog.json"
         if direct.is_file():
             return direct
-    except ImportError:
-        # Online bootstrap installs pymss without heavy ML dependencies. Locate its
-        # catalog through distribution metadata without executing pymss.__init__.
-        try:
-            from importlib.metadata import distribution
-
-            package = distribution("pymss")
-            for file in package.files or ():
-                if str(file).replace("\\", "/") == "pymss/resources/model_catalog.json":
-                    catalog = Path(package.locate_file(file)).resolve()
-                    if catalog.is_file():
-                        return catalog
-        except Exception:
-            pass
+    except Exception:
+        pass
     raise FileNotFoundError("Unable to locate pymss/resources/model_catalog.json")
 
 
@@ -806,6 +878,20 @@ def cmd_env_info() -> int:
     return 0
 
 
+def _load_registered_user_models() -> list[RegisteredUserModelEntry]:
+    registry = Path(
+        os.environ.get("PYMSS_USER_MODELS")
+        or Path.home() / ".cache" / "pymss" / "user_models.json"
+    ).expanduser()
+    if not registry.is_file():
+        return []
+    data = json.loads(registry.read_text(encoding="utf-8"))
+    models = data.get("models") if isinstance(data, dict) else None
+    if not isinstance(models, list):
+        raise ValueError(f"Invalid user model registry: {registry}")
+    return [RegisteredUserModelEntry.from_dict(item) for item in models if isinstance(item, dict)]
+
+
 def list_registered_user_models(category: str | None = None) -> list[Any]:
     """Locally registered custom models, or an empty list when none can be read.
 
@@ -816,8 +902,7 @@ def list_registered_user_models(category: str | None = None) -> list[Any]:
     `supported` is deliberately not filtered on — pymss registers every user model as supported
     (it has no catalog verdict to consult), so filtering would be a no-op that reads as a check."""
     try:
-        from pymss.user_models import list_user_models  # type: ignore
-        entries = list(list_user_models())
+        entries = _load_registered_user_models()
     except Exception:
         return []
     if category:

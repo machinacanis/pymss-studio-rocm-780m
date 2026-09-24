@@ -64,6 +64,57 @@ CATALOG_ENTRY = worker_models.ModelEntry.from_dict({
 })
 
 
+class LightweightModelDiscoveryTests(unittest.TestCase):
+    def setUp(self):
+        worker_models._model_catalog_path.cache_clear()
+        self.root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.root, True)
+
+    def tearDown(self):
+        worker_models._model_catalog_path.cache_clear()
+
+    def test_catalog_path_uses_distribution_metadata_without_importing_pymss(self):
+        catalog = self.root / "pymss" / "resources" / "model_catalog.json"
+        catalog.parent.mkdir(parents=True)
+        catalog.write_text('{"models": []}', encoding="utf-8")
+        package_file = Path("pymss/resources/model_catalog.json")
+        distribution = mock.Mock(files=[package_file])
+        distribution.locate_file.return_value = catalog
+
+        with mock.patch("importlib.metadata.distribution", return_value=distribution) as locate:
+            resolved = worker_models._model_catalog_path()
+
+        self.assertEqual(resolved, catalog.resolve())
+        locate.assert_called_once_with("pymss")
+
+    def test_user_registry_is_read_without_importing_pymss(self):
+        weights = self.root / "model.ckpt"
+        config = self.root / "model.yaml"
+        registry = self.root / "user-models.json"
+        registry.write_text(json.dumps({
+            "version": 1,
+            "models": [{
+                "name": "custom_model",
+                "model_type": "bs_roformer",
+                "model_path": str(weights),
+                "config_path": str(config),
+                "aliases": ["custom_alias"],
+                "inference_params": {"overlap_size": 4},
+            }],
+        }), encoding="utf-8")
+
+        with mock.patch.dict("os.environ", {"PYMSS_USER_MODELS": str(registry)}):
+            entries = worker_models._load_registered_user_models()
+
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0].name, "custom_model")
+        self.assertEqual(entries[0].model_path, str(weights))
+        self.assertEqual(entries[0].config_path, str(config))
+        self.assertEqual(entries[0].aliases, ("custom_alias",))
+        self.assertEqual(entries[0].inference_params, {"overlap_size": 4})
+        self.assertEqual(entries[0].category_path, "user/custom")
+
+
 class LegacyCatalogEntry:
     def __init__(self, name, relpath):
         self.name = name
@@ -648,12 +699,8 @@ class ListMergesImportedModelsTests(unittest.TestCase):
         self.stdout = io.StringIO()
 
     def _list(self, payload, user_entries, raises=None):
-        user_models = mock.Mock()
-        if raises is not None:
-            user_models.list_user_models.side_effect = raises
-        else:
-            user_models.list_user_models.return_value = user_entries
-        with mock.patch.dict("sys.modules", {"pymss": mock.Mock(), "pymss.user_models": user_models}), \
+        loader = mock.Mock(side_effect=raises) if raises is not None else mock.Mock(return_value=user_entries)
+        with mock.patch.object(worker_models, "_load_registered_user_models", loader), \
              mock.patch.object(worker_models, "list_catalog_models", return_value=[CATALOG_ENTRY]), \
              mock.patch.object(worker_models, "model_root", return_value=self.root), \
              redirect_stdout(self.stdout):
@@ -688,10 +735,7 @@ class ListMergesImportedModelsTests(unittest.TestCase):
     def test_a_category_filter_applies_to_imported_models_too(self):
         entry = FakeUserModelEntry("my_model", self.weights)
         kept = worker_models.list_registered_user_models
-        with mock.patch.dict("sys.modules", {
-            "pymss": mock.Mock(),
-            "pymss.user_models": mock.Mock(list_user_models=mock.Mock(return_value=[entry])),
-        }):
+        with mock.patch.object(worker_models, "_load_registered_user_models", return_value=[entry]):
             self.assertEqual(kept(category="user"), [entry])
             self.assertEqual(kept(category="user/custom"), [entry])
             self.assertEqual(kept(category="vocal"), [])

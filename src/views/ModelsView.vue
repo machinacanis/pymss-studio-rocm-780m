@@ -1067,7 +1067,7 @@ onMounted(() => {
     <!-- Body: Model Grid + Detail Drawer -->
     <div class="models-body">
       <!-- Loading Skeleton -->
-      <div v-if="isLoading" :class="['model-grid', `model-grid--${modelViewMode}`]">
+      <div v-if="isLoading && !modelStore.models.length" :class="['model-grid', `model-grid--${modelViewMode}`]">
         <div v-for="i in 6" :key="i" class="skel-card">
           <n-skeleton text style="width:70%;height:18px;margin-bottom:12px" />
           <n-skeleton text style="width:40%;height:14px;margin-bottom:16px" />

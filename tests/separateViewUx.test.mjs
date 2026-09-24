@@ -8,6 +8,8 @@ import { parse } from 'vue/compiler-sfc'
 const path = new URL('../src/views/SeparateView.vue', import.meta.url)
 const { descriptor } = parse(readFileSync(path, 'utf8'))
 const template = descriptor.template?.content || ''
+const modelsPath = new URL('../src/views/ModelsView.vue', import.meta.url)
+const modelsTemplate = parse(readFileSync(modelsPath, 'utf8')).descriptor.template?.content || ''
 const script = ts.createSourceFile('SeparateView.ts', descriptor.scriptSetup.content, ts.ScriptTarget.Latest, true)
 const names = new Set([
   'modelPanelHasModels',
@@ -50,7 +52,7 @@ test('model and workflow targets keep their keyed transition boundary', () => {
   assert.ok(closingIndex > workflowIndex)
 })
 
-test('model panel waits for the live model load instead of showing cached rows', () => {
+test('model panel shows cached rows while refreshing them in the background', () => {
   const context = {
     computed,
     modelsLoaded: { value: false },
@@ -61,12 +63,19 @@ test('model panel waits for the live model load instead of showing cached rows',
   }
   const result = vm.runInNewContext(`${code}\n({ modelPanelHasModels, modelPanelLoading })`, context)
 
+  assert.equal(result.modelPanelHasModels.value, true)
+  assert.equal(result.modelPanelLoading.value, false)
+  context.downloadedModels.value = []
   assert.equal(result.modelPanelHasModels.value, false)
   assert.equal(result.modelPanelLoading.value, true)
   context.modelsLoaded.value = true
   context.isLoading.value = false
-  assert.equal(result.modelPanelHasModels.value, true)
+  assert.equal(result.modelPanelHasModels.value, false)
   assert.equal(result.modelPanelLoading.value, false)
+})
+
+test('model library keeps cached cards visible while refreshing them in the background', () => {
+  assert.ok(modelsTemplate.includes('v-if="isLoading && !modelStore.models.length"'))
 })
 
 test('preview audio requests metadata before playback', () => {

@@ -213,8 +213,8 @@ const listedDownloadedModels = computed(() => {
 })
 const selectedModelListItem = computed(() => listedDownloadedModels.value.find(item => item.name === selectedModelName.value) || null)
 const modelDownloaded = computed(() => Boolean(selectedModelListItem.value))
-const modelPanelHasModels = computed(() => modelsLoaded.value && downloadedModels.value.length > 0)
-const modelPanelLoading = computed(() => !modelsLoaded.value && (isLoading.value || app.envLoading) && !modelError.value)
+const modelPanelHasModels = computed(() => downloadedModels.value.length > 0)
+const modelPanelLoading = computed(() => !modelPanelHasModels.value && !modelsLoaded.value && (isLoading.value || app.envLoading) && !modelError.value)
 const currentModelInfo = computed(() => {
   if (model.selectedInfo?.name === selectedModelName.value) return model.selectedInfo
   return selectedModelListItem.value

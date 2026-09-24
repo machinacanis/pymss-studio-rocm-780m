@@ -20,6 +20,24 @@ use std::os::windows::process::CommandExt;
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 const PYTHON_TERMINAL_LOG_PREFIX: &str = "__PYMSS_STUDIO_TERMINAL_LOG__";
+const HOST_PYTHON_ENV_VARS: &[&str] = &[
+    "PYTHONHOME",
+    "PYTHONPATH",
+    "PYTHONUSERBASE",
+    "PYTHONSTARTUP",
+    "PYTHONEXECUTABLE",
+    "__PYVENV_LAUNCHER__",
+    "VIRTUAL_ENV",
+    "PYENV_VERSION",
+    "CONDA_PREFIX",
+    "CONDA_PREFIX_1",
+    "CONDA_DEFAULT_ENV",
+    "CONDA_PROMPT_MODIFIER",
+    "CONDA_SHLVL",
+    "CONDA_EXE",
+    "_CE_CONDA",
+    "_CE_M",
+];
 
 static PAYLOAD_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -359,24 +377,19 @@ fn bundled_bin_dirs(app: &AppHandle) -> AppResult<Vec<PathBuf>> {
         .parent()
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));
-    Ok(bundled_bin_candidates(resource.as_deref(), &exe_dir, cfg!(target_os = "macos"))
+    Ok(bundled_bin_candidates(resource.as_deref(), &exe_dir)
         .into_iter()
         .filter(|dir| dir.is_dir())
         .collect())
 }
 
-fn bundled_bin_candidates(resource: Option<&Path>, exe_dir: &Path, macos: bool) -> Vec<PathBuf> {
+fn bundled_bin_candidates(resource: Option<&Path>, exe_dir: &Path) -> Vec<PathBuf> {
     let mut dirs: Vec<_> = resource
         .into_iter()
         .flat_map(storage::resource_roots)
         .map(|root| root.join("bin"))
         .collect();
     dirs.push(exe_dir.join("bin"));
-    if macos {
-        dirs.push(PathBuf::from("/opt/homebrew/bin"));
-        dirs.push(PathBuf::from("/usr/local/bin"));
-    }
-
     dirs
 }
 
@@ -468,6 +481,13 @@ fn prepend_path(existing: Option<String>, dirs: Vec<PathBuf>) -> Option<String> 
     Some(parts.join(path_separator()))
 }
 
+fn isolate_python_environment(cmd: &mut Command) {
+    for key in HOST_PYTHON_ENV_VARS {
+        cmd.env_remove(key);
+    }
+    cmd.env("PYTHONNOUSERSITE", "1");
+}
+
 fn default_output_dir(app: &AppHandle) -> AppResult<PathBuf> {
     storage::outputs_dir(app)
 }
@@ -514,6 +534,7 @@ fn build_worker_command(
     let python_for_log = python.clone();
     let worker_for_log = worker.clone();
     let mut cmd = Command::new(&python);
+    isolate_python_environment(&mut cmd);
     #[cfg(windows)]
     cmd.creation_flags(CREATE_NO_WINDOW);
     cmd.arg(worker)
@@ -1416,24 +1437,44 @@ mod tests {
     }
 
     #[test]
-    fn bin_candidates_keep_all_hits_and_platform_tail_in_order() {
+    fn bin_candidates_only_include_app_owned_directories() {
         let fixture = ResourceFixture::new("bin-layout");
         let resource = fixture.0.join("resources");
         let exe = fixture.0.join("portable");
         let expected = vec![resource.join("bin"), resource.join("_up_/bin"), resource.join("resources/bin"), exe.join("bin")];
-        assert_eq!(super::bundled_bin_candidates(Some(&resource), &exe, false), expected);
-        let mut mac = expected.clone();
-        mac.extend([std::path::PathBuf::from("/opt/homebrew/bin"), std::path::PathBuf::from("/usr/local/bin")]);
-        assert_eq!(super::bundled_bin_candidates(Some(&resource), &exe, true), mac);
+        assert_eq!(super::bundled_bin_candidates(Some(&resource), &exe), expected);
         fs::create_dir_all(&expected[1]).unwrap();
         fs::create_dir_all(&expected[3]).unwrap();
         fixture.file(&expected[2]);
-        let hits = super::bundled_bin_candidates(Some(&resource), &exe, false)
+        let hits = super::bundled_bin_candidates(Some(&resource), &exe)
             .into_iter().filter(|dir| dir.is_dir()).collect::<Vec<_>>();
         assert_eq!(hits, vec![expected[1].clone(), expected[3].clone()]);
-        assert_eq!(super::bundled_bin_candidates(None, &exe, false), vec![exe.join("bin")]);
-        let duplicate = super::bundled_bin_candidates(Some(&exe), &exe, false);
+        assert_eq!(super::bundled_bin_candidates(None, &exe), vec![exe.join("bin")]);
+        let duplicate = super::bundled_bin_candidates(Some(&exe), &exe);
         assert_eq!(duplicate[0], duplicate[3]);
+    }
+
+    #[test]
+    fn worker_python_environment_drops_host_python_and_conda_overrides() {
+        let mut command = std::process::Command::new("python");
+        for key in super::HOST_PYTHON_ENV_VARS {
+            command.env(key, "host-runtime");
+        }
+
+        super::isolate_python_environment(&mut command);
+
+        for key in super::HOST_PYTHON_ENV_VARS {
+            let (_, value) = command
+                .get_envs()
+                .find(|(name, _)| *name == std::ffi::OsStr::new(key))
+                .unwrap_or_else(|| panic!("{key} was not explicitly removed"));
+            assert!(value.is_none(), "{key} still leaks into the Worker");
+        }
+        let (_, no_user_site) = command
+            .get_envs()
+            .find(|(name, _)| *name == std::ffi::OsStr::new("PYTHONNOUSERSITE"))
+            .expect("PYTHONNOUSERSITE was not configured");
+        assert_eq!(no_user_site, Some(std::ffi::OsStr::new("1")));
     }
 
     #[test]
@@ -1492,7 +1533,7 @@ mod tests {
         assert_eq!(dirs, expected);
         let bin = fixture.0.join("bin");
         fs::create_dir_all(&bin).unwrap();
-        dirs.extend(super::bundled_bin_candidates(None, &fixture.0, false));
+        dirs.extend(super::bundled_bin_candidates(None, &fixture.0));
         expected.push(bin);
         let joined = expected.iter().map(|p| p.to_string_lossy()).collect::<Vec<_>>().join(";");
         assert_eq!(super::prepend_path(Some("existing-path".into()), dirs), Some(format!("{joined};existing-path")));

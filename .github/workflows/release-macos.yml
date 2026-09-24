@@ -67,10 +67,9 @@ jobs:
           fi
           PYTHONDONTWRITEBYTECODE=1 PYTHONHOME="$PWD/python-runtime" python-runtime/bin/python3 -c "import importlib.util, sys, ssl, venv, pip, pymss, pymss_core, torch; assert importlib.util.find_spec('mlx') is not None; assert torch.version.cuda is None; print(sys.prefix); print('bundled MLX runtime ok')"
 
-      - name: Install macOS bundled tools
-        run: brew install ffmpeg aria2
-
       - name: Copy clean resources for Tauri bundling
+        env:
+          PYMSS_MACOS_TOOLS_ARCH: ${{ matrix.arch }}
         run: |
           mkdir -p src-tauri/resources
           rm -rf src-tauri/resources/python src-tauri/resources/python-runtime src-tauri/resources/bin
@@ -166,11 +165,18 @@ jobs:
           test -x "$BIN/ffmpeg"
           test -x "$BIN/ffprobe"
           test -x "$BIN/aria2c"
-          test -f "$BIN/openssl/openssl.cnf"
-          test -f "$BIN/openssl/ossl-modules/legacy.dylib"
-          "$BIN/ffmpeg" -version
-          "$BIN/ffprobe" -version
-          OPENSSL_CONF="$BIN/openssl/openssl.cnf" OPENSSL_MODULES="$BIN/openssl/ossl-modules" "$BIN/aria2c" --version
+          for TOOL in ffmpeg ffprobe aria2c; do
+            INVALID_DEPS="$(otool -L "$BIN/$TOOL" | tail -n +2 | awk '{print $1}' | grep -Ev '^(/usr/lib/|/System/Library/|$)' || true)"
+            if [ -n "$INVALID_DEPS" ]; then
+              echo "$TOOL still links non-system libraries:" >&2
+              echo "$INVALID_DEPS" >&2
+              exit 1
+            fi
+          done
+          ISOLATED_PATH="$BIN:/usr/bin:/bin:/usr/sbin:/sbin"
+          PATH="$ISOLATED_PATH" "$BIN/ffmpeg" -version
+          PATH="$ISOLATED_PATH" "$BIN/ffprobe" -version
+          PATH="$ISOLATED_PATH" "$BIN/aria2c" --version
           test -d "$RESOURCE_ROOT/python-runtime/lib/python3.12"
           if otool -L "$PY" | grep -q '/Library/Frameworks/Python.framework/Versions/'; then
             echo "Bundled app runtime unexpectedly links system Python framework: $PY"
@@ -178,10 +184,10 @@ jobs:
             exit 1
           fi
           PYTHONDONTWRITEBYTECODE=1 PYTHONHOME="$RESOURCE_ROOT/python-runtime" "$PY" -c "import importlib.util, sys, ssl, venv, pip, pymss, pymss_core, pymss.graph, torch; assert importlib.util.find_spec('mlx') is not None; assert torch.version.cuda is None; print(sys.prefix); print('bundled MLX runtime ok')"
-          PATH="$BIN:$PATH" PYMSS_STUDIO_OPENSSL_CONF="$BIN/openssl/openssl.cnf" PYMSS_STUDIO_OPENSSL_MODULES="$BIN/openssl/ossl-modules" OPENSSL_CONF="$BIN/openssl/openssl.cnf" OPENSSL_MODULES="$BIN/openssl/ossl-modules" PYTHONDONTWRITEBYTECODE=1 PYTHONHOME="$RESOURCE_ROOT/python-runtime" "$PY" -c "import shutil; assert shutil.which('ffmpeg'); assert shutil.which('aria2c'); print('bundled tools ok')"
-          PATH="$BIN:$PATH" PYMSS_STUDIO_OPENSSL_CONF="$BIN/openssl/openssl.cnf" PYMSS_STUDIO_OPENSSL_MODULES="$BIN/openssl/ossl-modules" OPENSSL_CONF="$BIN/openssl/openssl.cnf" OPENSSL_MODULES="$BIN/openssl/ossl-modules" PYTHONDONTWRITEBYTECODE=1 PYTHONHOME="$RESOURCE_ROOT/python-runtime" "$ENV_PY" -c "from pymss.model_download import ARIA2C_PATH; assert ARIA2C_PATH, 'pymss cannot see the bundled aria2c'; print('aria2 resolver ok:', ARIA2C_PATH)"
-          PATH="$BIN:$PATH" PYMSS_STUDIO_OPENSSL_CONF="$BIN/openssl/openssl.cnf" PYMSS_STUDIO_OPENSSL_MODULES="$BIN/openssl/ossl-modules" OPENSSL_CONF="$BIN/openssl/openssl.cnf" OPENSSL_MODULES="$BIN/openssl/ossl-modules" PYTHONDONTWRITEBYTECODE=1 PYTHONHOME="$RESOURCE_ROOT/python-runtime" "$ENV_PY" "$WORKER" env_info
-          PATH="$BIN:$PATH" PYMSS_STUDIO_OPENSSL_CONF="$BIN/openssl/openssl.cnf" PYMSS_STUDIO_OPENSSL_MODULES="$BIN/openssl/ossl-modules" OPENSSL_CONF="$BIN/openssl/openssl.cnf" OPENSSL_MODULES="$BIN/openssl/ossl-modules" PYTHONDONTWRITEBYTECODE=1 PYTHONHOME="$RESOURCE_ROOT/python-runtime" "$ENV_PY" "$WORKER" list_models --payload "{}"
+          PATH="$ISOLATED_PATH" PYTHONDONTWRITEBYTECODE=1 PYTHONHOME="$RESOURCE_ROOT/python-runtime" "$PY" -c "from pathlib import Path; import shutil; expected=Path('$BIN'); assert Path(shutil.which('ffmpeg')).resolve().parent == expected.resolve(); assert Path(shutil.which('aria2c')).resolve().parent == expected.resolve(); print('bundled tools ok')"
+          PATH="$ISOLATED_PATH" PYTHONDONTWRITEBYTECODE=1 PYTHONHOME="$RESOURCE_ROOT/python-runtime" "$ENV_PY" -c "from pathlib import Path; from pymss.model_download import ARIA2C_PATH; assert ARIA2C_PATH and Path(ARIA2C_PATH).resolve() == Path('$BIN/aria2c').resolve(), 'pymss did not select the bundled aria2c'; print('aria2 resolver ok:', ARIA2C_PATH)"
+          PATH="$ISOLATED_PATH" PYTHONDONTWRITEBYTECODE=1 PYTHONHOME="$RESOURCE_ROOT/python-runtime" "$ENV_PY" "$WORKER" env_info
+          PATH="$ISOLATED_PATH" PYTHONDONTWRITEBYTECODE=1 PYTHONHOME="$RESOURCE_ROOT/python-runtime" "$ENV_PY" "$WORKER" list_models --payload "{}"
           codesign --verify --deep --strict --verbose=4 "$APP"
 
       - name: Build DMG with hdiutil

@@ -239,6 +239,81 @@ function hasInferenceField(key: string) {
   if (key === 'num_overlap' && isApolloModel.value) return false
   return Object.prototype.hasOwnProperty.call(currentModelDefaults.value, key)
 }
+
+function collectCurrentModelInferenceDefaults(): ModelDefaultInferenceParams {
+  const defaults = currentModelDefaults.value
+  const hasField = (key: keyof ModelDefaultInferenceParams) => Object.prototype.hasOwnProperty.call(defaults, key)
+  const next: ModelDefaultInferenceParams = {}
+
+  if (hasField('batch_size') && typeof batch_size.value === 'number' && Number.isFinite(batch_size.value)) {
+    next.batch_size = batch_size.value
+  }
+  if (hasField('overlap_size') && typeof overlap_size.value === 'number' && Number.isFinite(overlap_size.value)) {
+    next.overlap_size = overlap_size.value
+  }
+  if (hasField('num_overlap') && !isApolloModel.value && typeof num_overlap.value === 'number' && Number.isFinite(num_overlap.value)) {
+    next.num_overlap = num_overlap.value
+  }
+  if (hasField('chunk_size') && typeof chunk_size.value === 'number' && Number.isFinite(chunk_size.value)) {
+    next.chunk_size = chunk_size.value
+  }
+  if (hasField('window_size') && typeof window_size.value === 'number' && Number.isFinite(window_size.value)) {
+    next.window_size = window_size.value
+  }
+  if (hasField('aggression') && typeof aggression.value === 'number' && Number.isFinite(aggression.value)) {
+    next.aggression = aggression.value
+  }
+  if (hasField('enable_post_process')) next.enable_post_process = enable_post_process.value
+  if (hasField('post_process_threshold') && typeof post_process_threshold.value === 'number' && Number.isFinite(post_process_threshold.value)) {
+    next.post_process_threshold = post_process_threshold.value
+  }
+  if (hasField('high_end_process')) next.high_end_process = high_end_process.value
+  if (showStandardizeField.value) next.standardize = standardize.value
+  if (showNormalizeField.value) next.normalize = normalize.value
+
+  return next
+}
+
+function applyCurrentModelInferenceDefaults(info: ModelEntry) {
+  const latest = model.models.find(item => item.name === info.name) || info
+  task.applySelectedModelDefaults(
+    model.getModelBaseInferenceDefaults(info.name) || latest.defaultInferenceParams,
+    latest.modelType,
+    task.getSavedModelState(info.name),
+    model.getModelInferenceOverrides(info.name),
+    { force: true },
+  )
+}
+
+async function saveCurrentModelInferenceDefaults() {
+  const info = currentModelInfo.value
+  if (!info) return
+  task.normalizeInferenceInputsBeforeSubmit()
+  const overrides = collectCurrentModelInferenceDefaults()
+  if (!Object.keys(overrides).length) return
+  try {
+    await model.setModelInferenceOverrides(info.name, overrides)
+    applyCurrentModelInferenceDefaults(info)
+    message.success(t('models.inferenceDefaultsSaved'))
+  } catch (error) {
+    console.error('Failed to persist model inference defaults', error)
+    message.error(t('models.inferenceDefaultsSaveFailed'))
+  }
+}
+
+async function resetCurrentModelInferenceDefaults() {
+  const info = currentModelInfo.value
+  if (!info) return
+  try {
+    await model.resetModelInferenceOverrides(info.name)
+    applyCurrentModelInferenceDefaults(info)
+    message.success(t('models.inferenceDefaultsReset'))
+  } catch (error) {
+    console.error('Failed to restore model inference defaults', error)
+    message.error(t('models.inferenceDefaultsResetFailed'))
+  }
+}
+
 function parseModelInstruments(value?: unknown) {
   const seen = new Set<string>()
   const rawItems = Array.isArray(value)
@@ -2505,6 +2580,17 @@ async function retryCurrentTask() {
                 <p v-if="runMode === 'model' && !advancedParamsLoading && !hasVisibleAdvancedFields" class="advanced-empty">
                   {{ t('separate.advancedPanelEmpty') }}
                 </p>
+                <div
+                  v-if="runMode === 'model' && currentModelInfo && currentModelDefaultsResolved && !advancedParamsLoading"
+                  class="advanced-actions"
+                >
+                  <n-button size="small" secondary @click="resetCurrentModelInferenceDefaults">
+                    {{ t('separate.resetInferenceDefaults') }}
+                  </n-button>
+                  <n-button size="small" type="primary" @click="saveCurrentModelInferenceDefaults">
+                    {{ t('separate.saveInferenceDefaults') }}
+                  </n-button>
+                </div>
               </n-collapse-item>
             </n-collapse>
           </div>
@@ -4582,6 +4668,14 @@ async function retryCurrentTask() {
 
 .advanced-empty {
   margin-top: 14px;
+}
+
+.advanced-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 16px;
 }
 
 .check-list {

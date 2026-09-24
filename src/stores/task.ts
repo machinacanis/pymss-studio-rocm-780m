@@ -756,7 +756,7 @@ export const useTaskStore = defineStore('task', () => {
       Object.entries(separateStored?.inferenceParamsByModel || {})
         .map(([name, value]) => {
           const normalized = normalizePersistedModelState(value)
-          return [name, normalized]
+          return [name, { selectedStems: normalized.selectedStems || [] }]
         }),
     )
     initialized.value = true

@@ -21,6 +21,10 @@ const names = new Set([
   'trimPreviewAudioCache',
   'getAudio',
   'syncOutputPreviewAudio',
+  'collectCurrentModelInferenceDefaults',
+  'applyCurrentModelInferenceDefaults',
+  'saveCurrentModelInferenceDefaults',
+  'resetCurrentModelInferenceDefaults',
 ])
 const selected = script.statements.filter(statement => (
   ts.isFunctionDeclaration(statement) ? names.has(statement.name?.text)
@@ -76,6 +80,117 @@ test('model panel shows cached rows while refreshing them in the background', ()
 
 test('model library keeps cached cards visible while refreshing them in the background', () => {
   assert.ok(modelsTemplate.includes('v-if="isLoading && !modelStore.models.length"'))
+})
+
+test('advanced inference settings expose model-scoped save and reset actions', async () => {
+  assert.ok(template.includes('@click="saveCurrentModelInferenceDefaults"'))
+  assert.ok(template.includes('@click="resetCurrentModelInferenceDefaults"'))
+  assert.ok(template.includes("t('separate.saveInferenceDefaults')"))
+  assert.ok(template.includes("t('separate.resetInferenceDefaults')"))
+
+  const calls = []
+  const info = {
+    name: 'test-model',
+    modelType: 'bs_roformer',
+    defaultInferenceParams: { batch_size: 1, overlap_size: 1024, chunk_size: 8192 },
+  }
+  let storedOverrides
+  const context = {
+    computed,
+    modelsLoaded: { value: true },
+    downloadedModels: { value: [] },
+    isLoading: { value: false },
+    modelError: { value: null },
+    app: { envLoading: false },
+    currentModelDefaults: {
+      value: {
+        batch_size: 1,
+        overlap_size: 1024,
+        num_overlap: 4,
+        chunk_size: 8192,
+        window_size: 512,
+        aggression: 5,
+        enable_post_process: false,
+        post_process_threshold: 0.2,
+        high_end_process: false,
+      },
+    },
+    batch_size: { value: 2 },
+    overlap_size: { value: 2048 },
+    num_overlap: { value: 8 },
+    chunk_size: { value: 16384 },
+    window_size: { value: 1024 },
+    aggression: { value: 7 },
+    enable_post_process: { value: true },
+    post_process_threshold: { value: 0.35 },
+    high_end_process: { value: true },
+    standardize: { value: true },
+    normalize: { value: true },
+    isApolloModel: { value: false },
+    showStandardizeField: { value: true },
+    showNormalizeField: { value: true },
+    currentModelInfo: { value: info },
+    model: {
+      models: [info],
+      getModelBaseInferenceDefaults: () => info.defaultInferenceParams,
+      getModelInferenceOverrides: () => storedOverrides,
+      async setModelInferenceOverrides(name, overrides) {
+        storedOverrides = overrides
+        calls.push(['save', name, overrides])
+      },
+      async resetModelInferenceOverrides(name) {
+        storedOverrides = undefined
+        calls.push(['reset', name])
+      },
+    },
+    task: {
+      normalizeInferenceInputsBeforeSubmit: () => calls.push(['normalize']),
+      getSavedModelState: () => ({ selectedStems: ['vocals'] }),
+      applySelectedModelDefaults: (...args) => calls.push(['apply', ...args]),
+    },
+    message: { success: value => calls.push(['success', value]) },
+    t: key => key,
+  }
+  const result = vm.runInNewContext(
+    `${code}\n({ collectCurrentModelInferenceDefaults, saveCurrentModelInferenceDefaults, resetCurrentModelInferenceDefaults })`,
+    context,
+  )
+
+  assert.deepEqual(
+    { ...result.collectCurrentModelInferenceDefaults() },
+    {
+      batch_size: 2,
+      overlap_size: 2048,
+      num_overlap: 8,
+      chunk_size: 16384,
+      window_size: 1024,
+      aggression: 7,
+      enable_post_process: true,
+      post_process_threshold: 0.35,
+      high_end_process: true,
+      standardize: true,
+      normalize: true,
+    },
+  )
+  context.isApolloModel.value = true
+  assert.equal(result.collectCurrentModelInferenceDefaults().num_overlap, undefined)
+  context.isApolloModel.value = false
+
+  await result.saveCurrentModelInferenceDefaults()
+  assert.equal(calls[0][0], 'normalize')
+  assert.deepEqual(calls[1].slice(0, 2), ['save', 'test-model'])
+  assert.equal(calls[2][0], 'apply')
+  assert.deepEqual(calls[2][3], { selectedStems: ['vocals'] })
+  assert.equal(calls[2][5].force, true)
+  assert.deepEqual(calls[3], ['success', 'models.inferenceDefaultsSaved'])
+
+  calls.length = 0
+  await result.resetCurrentModelInferenceDefaults()
+  assert.deepEqual(calls[0], ['reset', 'test-model'])
+  assert.equal(calls[1][0], 'apply')
+  assert.equal(calls[1][4], undefined)
+  assert.equal(calls[1][5].force, true)
+  assert.deepEqual(calls[2], ['success', 'models.inferenceDefaultsReset'])
 })
 
 test('preview audio requests metadata before playback', () => {

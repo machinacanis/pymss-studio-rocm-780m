@@ -535,22 +535,27 @@ function canResetInferenceDefaults(model: ModelEntry | null | undefined) {
   return hasInferenceOverride(model) || hasInferenceDraftChanges(model)
 }
 
-function saveInferenceDefaults() {
+async function saveInferenceDefaults() {
   const model = inferenceEditorModel.value
   if (!model) return
-  modelStore.setModelInferenceOverrides(model.name, inferenceDraft.value)
-  if (selectedModel.value === model.name) {
-    const selected = modelStore.selectedInfo?.name === model.name ? modelStore.selectedInfo : model
-    taskStore.applySelectedModelDefaults(
-      modelStore.getModelBaseInferenceDefaults(model.name) || selected.defaultInferenceParams,
-      selected.modelType,
-      taskStore.getSavedModelState(model.name),
-      modelStore.getModelInferenceOverrides(model.name),
-      { force: true },
-    )
+  try {
+    await modelStore.setModelInferenceOverrides(model.name, inferenceDraft.value)
+    if (selectedModel.value === model.name) {
+      const selected = modelStore.selectedInfo?.name === model.name ? modelStore.selectedInfo : model
+      taskStore.applySelectedModelDefaults(
+        modelStore.getModelBaseInferenceDefaults(model.name) || selected.defaultInferenceParams,
+        selected.modelType,
+        taskStore.getSavedModelState(model.name),
+        modelStore.getModelInferenceOverrides(model.name),
+        { force: true },
+      )
+    }
+    closeInferenceEditor()
+    message.success(t('models.inferenceDefaultsSaved'))
+  } catch (error) {
+    console.error('Failed to persist model inference defaults', error)
+    message.error(t('models.inferenceDefaultsSaveFailed'))
   }
-  closeInferenceEditor()
-  message.success(t('models.inferenceDefaultsSaved'))
 }
 
 function storageModelTypeLabel(item: StorageListItem) {
@@ -560,25 +565,30 @@ function storageModelTypeLabel(item: StorageListItem) {
   return t('models.storageAsrRecognitionModel')
 }
 
-function resetInferenceDefaults() {
+async function resetInferenceDefaults() {
   const model = inferenceEditorModel.value
   if (!model) return
-  if (hasInferenceOverride(model)) {
-    modelStore.resetModelInferenceOverrides(model.name)
+  try {
+    if (hasInferenceOverride(model)) {
+      await modelStore.resetModelInferenceOverrides(model.name)
+    }
+    const latest = modelStore.models.find((item) => item.name === model.name) || model
+    syncInferenceDraft(latest)
+    if (selectedModel.value === model.name) {
+      const selected = modelStore.selectedInfo?.name === model.name ? modelStore.selectedInfo : latest
+      taskStore.applySelectedModelDefaults(
+        modelStore.getModelBaseInferenceDefaults(model.name) || selected.defaultInferenceParams,
+        selected.modelType,
+        taskStore.getSavedModelState(model.name),
+        modelStore.getModelInferenceOverrides(model.name),
+        { force: true },
+      )
+    }
+    message.success(t('models.inferenceDefaultsReset'))
+  } catch (error) {
+    console.error('Failed to restore model inference defaults', error)
+    message.error(t('models.inferenceDefaultsResetFailed'))
   }
-  const latest = modelStore.models.find((item) => item.name === model.name) || model
-  syncInferenceDraft(latest)
-  if (selectedModel.value === model.name) {
-    const selected = modelStore.selectedInfo?.name === model.name ? modelStore.selectedInfo : latest
-    taskStore.applySelectedModelDefaults(
-      modelStore.getModelBaseInferenceDefaults(model.name) || selected.defaultInferenceParams,
-      selected.modelType,
-      taskStore.getSavedModelState(model.name),
-      modelStore.getModelInferenceOverrides(model.name),
-      { force: true },
-    )
-  }
-  message.success(t('models.inferenceDefaultsReset'))
 }
 
 async function loadModels() {

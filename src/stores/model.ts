@@ -527,6 +527,14 @@ export const useModelStore = defineStore('model', () => {
     }, 120)
   }
 
+  async function flushPersistState() {
+    if (saveTimer) {
+      clearTimeout(saveTimer)
+      saveTimer = null
+    }
+    await persistState()
+  }
+
   async function initialize() {
     if (initialized.value) return
     const stored = await loadAppStore<StoredModelState>('model-state')
@@ -628,31 +636,46 @@ export const useModelStore = defineStore('model', () => {
     }
   }
 
-  function setModelInferenceOverrides(name: string, overrides: ModelDefaultInferenceParams) {
-    const normalized = normalizeDefaultInferenceParams(overrides as Record<string, unknown>)
+  function refreshModelInferenceOverrides(name: string) {
+    const index = models.value.findIndex((item) => item.name === name)
+    if (index >= 0) models.value[index] = normalizeModelEntryWithOverrides(models.value[index], { rememberBase: false })
+    if (selectedInfo.value?.name === name) selectedInfo.value = normalizeModelEntryWithOverrides(selectedInfo.value, { rememberBase: false })
+  }
+
+  async function setModelInferenceOverrides(name: string, overrides: ModelDefaultInferenceParams) {
+    const normalized = normalizeDefaultInferenceParams({
+      ...(modelInferenceOverrides.value[name] || {}),
+      ...overrides,
+    } as Record<string, unknown>)
     if (!normalized) return
+    const previousOverrides = modelInferenceOverrides.value
     modelInferenceOverrides.value = {
       ...modelInferenceOverrides.value,
       [name]: normalized,
     }
-    const index = models.value.findIndex((item) => item.name === name)
-    if (index >= 0) models.value[index] = normalizeModelEntryWithOverrides(models.value[index], { rememberBase: false })
-    if (selectedInfo.value?.name === name) selectedInfo.value = normalizeModelEntryWithOverrides(selectedInfo.value, { rememberBase: false })
-    queuePersist()
+    refreshModelInferenceOverrides(name)
+    try {
+      await flushPersistState()
+    } catch (error) {
+      modelInferenceOverrides.value = previousOverrides
+      refreshModelInferenceOverrides(name)
+      throw error
+    }
   }
 
-  function resetModelInferenceOverrides(name: string) {
+  async function resetModelInferenceOverrides(name: string) {
     if (!modelInferenceOverrides.value[name]) return
+    const previousOverrides = modelInferenceOverrides.value
     const { [name]: _, ...rest } = modelInferenceOverrides.value
     modelInferenceOverrides.value = rest
-    const index = models.value.findIndex((item) => item.name === name)
-    if (index >= 0) {
-      models.value[index] = normalizeModelEntryWithOverrides(models.value[index], { rememberBase: false })
-      if (selectedInfo.value?.name === name) selectedInfo.value = models.value[index]
-    } else if (selectedInfo.value?.name === name) {
-      selectedInfo.value = normalizeModelEntryWithOverrides(selectedInfo.value, { rememberBase: false })
+    refreshModelInferenceOverrides(name)
+    try {
+      await flushPersistState()
+    } catch (error) {
+      modelInferenceOverrides.value = previousOverrides
+      refreshModelInferenceOverrides(name)
+      throw error
     }
-    queuePersist()
   }
 
   function getModelInferenceOverrides(name: string) {

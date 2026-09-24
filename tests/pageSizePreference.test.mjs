@@ -48,7 +48,7 @@ afterEach(async () => {
   Reflect.deleteProperty(globalThis, 'localStorage')
 })
 
-function browserStorage(initial = {}) {
+function browserStorage(initial = {}, options = {}) {
   const values = new Map(
     Object.entries(initial).map(([name, value]) => [
       `pymss-studio:${name}`,
@@ -60,6 +60,7 @@ function browserStorage(initial = {}) {
   globalThis.localStorage = {
     getItem: key => values.get(key) ?? null,
     setItem(key, value) {
+      if (options.failWrites) throw new Error('storage write failed')
       values.set(key, value)
       writes.push({ key, value: JSON.parse(value) })
     },
@@ -121,4 +122,89 @@ test('invalid stored page sizes fall back to each view default', async () => {
 
   assert.equal(modelStore.modelPageSize, 24)
   assert.equal(taskStore.modelListPageSize, 12)
+})
+
+test('model inference overrides merge hidden fields and persist before resolving', async () => {
+  const storage = browserStorage({
+    'model-state': {
+      modelInferenceOverrides: {
+        'test-model': {
+          window_size: 1024,
+          normalize: true,
+        },
+      },
+    },
+  })
+  const store = newModelStore()
+
+  await store.initialize()
+  await store.setModelInferenceOverrides('test-model', {
+    batch_size: 2,
+    overlap_size: 2048,
+    chunk_size: 16384,
+  })
+
+  assert.deepEqual(
+    { ...store.getModelInferenceOverrides('test-model') },
+    {
+      window_size: 1024,
+      normalize: true,
+      batch_size: 2,
+      overlap_size: 2048,
+      chunk_size: 16384,
+    },
+  )
+  assert.deepEqual(
+    storage.writes.at(-1)?.value.modelInferenceOverrides['test-model'],
+    store.getModelInferenceOverrides('test-model'),
+  )
+
+  await store.resetModelInferenceOverrides('test-model')
+  assert.equal(store.getModelInferenceOverrides('test-model'), undefined)
+  assert.equal(storage.writes.at(-1)?.value.modelInferenceOverrides['test-model'], undefined)
+})
+
+test('legacy per-model inference drafts retain stems without overriding model defaults', async () => {
+  browserStorage({
+    'separate-state': {
+      inferenceParamsByModel: {
+        'test-model': {
+          overlap_size: 4096,
+          chunk_size: 32768,
+          standardize: true,
+          selectedStems: ['vocals'],
+        },
+      },
+    },
+  })
+  const store = newTaskStore()
+
+  await store.initialize()
+
+  assert.deepEqual(
+    { ...store.getSavedModelState('test-model') },
+    { selectedStems: ['vocals'] },
+  )
+})
+
+test('failed model inference persistence restores the previous overrides', async () => {
+  browserStorage({
+    'model-state': {
+      modelInferenceOverrides: {
+        'test-model': { overlap_size: 1024 },
+      },
+    },
+  }, { failWrites: true })
+  const store = newModelStore()
+
+  await store.initialize()
+  await assert.rejects(
+    store.setModelInferenceOverrides('test-model', { overlap_size: 4096 }),
+    /storage write failed/,
+  )
+
+  assert.deepEqual(
+    { ...store.getModelInferenceOverrides('test-model') },
+    { overlap_size: 1024 },
+  )
 })

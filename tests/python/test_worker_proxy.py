@@ -1,4 +1,7 @@
+import json
 import os
+import subprocess
+import sys
 import unittest
 from unittest import mock
 
@@ -7,7 +10,7 @@ if __package__:
 else:
     import _bootstrap as _worker_test_bootstrap
 
-from worker_download import _test_url_for_source
+from worker_connection import _test_url_for_source
 from worker_proxy import ProxyConfigError, configure_process_proxy, effective_proxy_url, parse_proxy_config, redacted_proxy
 
 
@@ -37,6 +40,45 @@ class ProxyConfigTests(unittest.TestCase):
         self.assertIn("modelscope.cn", _test_url_for_source("modelscope"))
         self.assertIn("huggingface.co", _test_url_for_source("huggingface"))
         self.assertIn("hf-mirror.com", _test_url_for_source("hf-mirror"))
+
+    def test_connection_command_runs_without_site_packages(self):
+        worker = _worker_test_bootstrap.WORKER_DIR / "worker.py"
+        payload = json.dumps({
+            "mode": "custom",
+            "url": "http://127.0.0.1:1",
+            "timeout": 1,
+        })
+        result = subprocess.run(
+            [sys.executable, "-S", str(worker), "test_connection", "--payload", payload],
+            capture_output=True,
+            check=False,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        event = json.loads(result.stdout.strip().splitlines()[-1])
+        self.assertEqual(event["type"], "test_connection_result")
+        self.assertFalse(event["payload"]["ok"])
+
+    def test_connection_command_has_socks_transport_dependencies(self):
+        worker = _worker_test_bootstrap.WORKER_DIR / "worker.py"
+        payload = json.dumps({
+            "mode": "custom",
+            "url": "socks5://127.0.0.1:1",
+            "timeout": 1,
+        })
+        result = subprocess.run(
+            [sys.executable, str(worker), "test_connection", "--payload", payload],
+            capture_output=True,
+            check=False,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        event = json.loads(result.stdout.strip().splitlines()[-1])
+        self.assertEqual(event["type"], "test_connection_result")
+        self.assertFalse(event["payload"]["ok"])
+        error = event["payload"].get("error", "")
+        self.assertNotIn("No module named", error)
+        self.assertNotIn("Missing dependencies for SOCKS support", error)
 
 
 class SocksRoutingTests(unittest.TestCase):

@@ -68,19 +68,38 @@ impl Drop for RuntimeAccessGuard<'_> {
     }
 }
 
-fn uses_bootstrap_python(command: &str) -> bool {
+fn requires_bootstrap_python(command: &str) -> bool {
     matches!(command,
         "health" | "runtime_info" | "runtime_env_sizes" | "runtime_core_versions"
         | "install_runtime" | "activate_runtime" | "delete_runtime" | "update_runtime_core"
-        | "test_connection"
     )
+}
+
+fn select_worker_python(
+    command: &str,
+    bootstrap_python: &str,
+    active_runtime_python: Option<String>,
+) -> AppResult<String> {
+    if requires_bootstrap_python(command) {
+        return Ok(bootstrap_python.to_string());
+    }
+    if let Some(python) = active_runtime_python {
+        return Ok(python);
+    }
+    if command == "test_connection" {
+        return Ok(bootstrap_python.to_string());
+    }
+    Err(AppError::Worker(
+        "No active runtime environment is installed. Open Settings to install one before running this operation."
+            .into(),
+    ))
 }
 
 fn acquire_runtime_access<'a>(
     access: &'a Mutex<RuntimeAccess>, command: &str,
 ) -> AppResult<Option<RuntimeAccessGuard<'a>>> {
     let updating = command == "update_runtime_core";
-    if !updating && uses_bootstrap_python(command) {
+    if !updating && requires_bootstrap_python(command) {
         return Ok(None);
     }
     let mut state = access.lock()
@@ -522,15 +541,12 @@ fn build_worker_command(
     // Runtime management must never run inside the environment it is managing: the bootstrap
     // interpreter is the only one guaranteed to exist while an environment is being built,
     // switched, or deleted.
-    let python = if uses_bootstrap_python(command) {
-        bootstrap_python.clone()
+    let active_runtime_python = if requires_bootstrap_python(command) {
+        None
     } else {
-        active_runtime_python_path(app)?.ok_or_else(|| {
-            AppError::Worker(
-                "No active runtime environment is installed. Open Settings to install one before running this operation.".into(),
-            )
-        })?
+        active_runtime_python_path(app)?
     };
+    let python = select_worker_python(command, &bootstrap_python, active_runtime_python)?;
     let python_for_log = python.clone();
     let worker_for_log = worker.clone();
     let mut cmd = Command::new(&python);
@@ -1316,7 +1332,15 @@ mod tests {
         drop(workflow);
 
         let update = super::acquire_runtime_access(&access, "update_runtime_core").unwrap();
-        for command in ["infer", "infer_workflow", "env_info", "list_models", "audio_tools", "update_runtime_core"] {
+        for command in [
+            "infer",
+            "infer_workflow",
+            "env_info",
+            "list_models",
+            "audio_tools",
+            "test_connection",
+            "update_runtime_core",
+        ] {
             let result = super::acquire_runtime_access(&access, command);
             assert!(result.is_err(), "{command} must wait for the core update");
             assert!(result.err().unwrap().to_string().contains("RUNTIME_BUSY"));
@@ -1341,6 +1365,37 @@ mod tests {
         };
         assert!(fail_start().is_err());
         assert!(super::acquire_runtime_access(&access, "update_runtime_core").is_ok());
+    }
+
+    #[test]
+    fn connection_test_prefers_active_runtime_and_falls_back_to_bootstrap() {
+        assert_eq!(
+            super::select_worker_python(
+                "test_connection",
+                "bootstrap-python",
+                Some("active-python".into()),
+            )
+            .unwrap(),
+            "active-python",
+        );
+        assert_eq!(
+            super::select_worker_python("test_connection", "bootstrap-python", None).unwrap(),
+            "bootstrap-python",
+        );
+    }
+
+    #[test]
+    fn runtime_management_ignores_active_runtime_but_inference_requires_it() {
+        assert_eq!(
+            super::select_worker_python(
+                "install_runtime",
+                "bootstrap-python",
+                Some("active-python".into()),
+            )
+            .unwrap(),
+            "bootstrap-python",
+        );
+        assert!(super::select_worker_python("infer", "bootstrap-python", None).is_err());
     }
 
     fn temp_root(label: &str) -> std::path::PathBuf {

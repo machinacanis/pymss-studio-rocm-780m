@@ -29,6 +29,11 @@ function Get-ManifestCommonRequirements {
         ForEach-Object { [string]$_.Value })
 }
 
+function Get-ManifestBootstrapRequirements {
+    @($runtimeManifest.bootstrap.PSObject.Properties |
+        ForEach-Object { [string]$_.Value })
+}
+
 function Get-ManifestRequirement {
     param(
         [Parameter(Mandatory = $true)]
@@ -61,6 +66,7 @@ function Resolve-ManifestBackend {
 }
 
 $manifestBackend = Resolve-ManifestBackend
+$manifestBootstrapRequirements = Get-ManifestBootstrapRequirements
 $manifestCommonRequirements = Get-ManifestCommonRequirements
 $manifestPymssRequirement = Get-ManifestRequirement "pymss"
 $manifestPymssCoreRequirement = Get-ManifestRequirement "pymss-core"
@@ -100,7 +106,7 @@ function Invoke-NativeChecked {
     }
 }
 
-function Assert-BootstrapRequirementParser {
+function Assert-BootstrapRuntime {
     param(
         [Parameter(Mandatory = $true)]
         [string]$PythonPath
@@ -108,8 +114,19 @@ function Assert-BootstrapRequirementParser {
 
     Invoke-NativeChecked -FilePath $PythonPath -Arguments @(
         '-c',
-        "from pip._vendor.packaging.requirements import Requirement; from pip._vendor.packaging.version import Version; assert Requirement('pymss>=2.1').name == 'pymss'; assert Version('2.1.5') > Version('2.1.4')"
+        "import requests, socks; from pip._vendor.packaging.requirements import Requirement; from pip._vendor.packaging.version import Version; assert Requirement('pymss>=2.1').name == 'pymss'; assert Version('2.1.5') > Version('2.1.4')"
     )
+}
+
+function Install-BootstrapRequirements {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$PythonPath
+    )
+
+    if ($manifestBootstrapRequirements.Count -gt 0) {
+        Invoke-NativeChecked -FilePath $PythonPath -Arguments (@('-m', 'pip', 'install', '--no-cache-dir') + $manifestBootstrapRequirements)
+    }
 }
 
 function Rewrite-WindowsRuntimeEnvConfigs {
@@ -211,6 +228,7 @@ if ($InitialBackend) {
     New-Item -ItemType Directory -Force -Path $sitePackages | Out-Null
     Invoke-NativeChecked -FilePath $runtimePython -Arguments @('-m', 'ensurepip', '--upgrade')
     Invoke-NativeChecked -FilePath $runtimePython -Arguments @('-m', 'pip', 'install', '--upgrade', 'pip', 'setuptools', 'wheel')
+    Install-BootstrapRequirements -PythonPath $runtimePython
     Write-Host "Bootstrap runtime created at $runtime"
 
     # Step 2: Create venv for the initial backend
@@ -226,7 +244,7 @@ if ($InitialBackend) {
         throw "venv python.exe was not created at $envPython"
     }
     & (Join-Path $PSScriptRoot "prune-python-runtime.ps1") -RuntimeDir $runtime -KeepVenv
-    Assert-BootstrapRequirementParser -PythonPath $runtimePython
+    Assert-BootstrapRuntime -PythonPath $runtimePython
     Invoke-NativeChecked -FilePath $envPython -Arguments @('-m', 'pip', 'install', '--upgrade', 'pip', 'setuptools', 'wheel')
 
     # Step 3: Install packages for the backend
@@ -393,11 +411,13 @@ if ($Minimal) {
     }
     New-Item -ItemType Directory -Force -Path $sitePackages | Out-Null
     Invoke-NativeChecked -FilePath $runtimePython -Arguments @('-m', 'ensurepip', '--upgrade')
+    Install-BootstrapRequirements -PythonPath $runtimePython
     Invoke-NativeChecked -FilePath $runtimePython -Arguments @('-m', 'pip', '--version')
-    Assert-BootstrapRequirementParser -PythonPath $runtimePython
+    Assert-BootstrapRuntime -PythonPath $runtimePython
     Write-Host "Prepared minimal Python runtime without inference dependencies"
     exit 0
 }
+Install-BootstrapRequirements -PythonPath $runtimePython
 $torchRequirement = $effectiveTorchRequirement
 if ($Variant -eq "rocm") {
     $rocmSdkWheels = @($manifestTorch.rocmRequirements | ForEach-Object { [string]$_ })
@@ -417,7 +437,7 @@ Invoke-NativeChecked -FilePath $runtimePython -Arguments (@('-m', 'pip', 'instal
 
 & (Join-Path $PSScriptRoot "prune-python-runtime.ps1") -RuntimeDir $runtime -KeepVenv
 Invoke-NativeChecked -FilePath $runtimePython -Arguments @('-m', 'pip', '--version')
-Assert-BootstrapRequirementParser -PythonPath $runtimePython
+Assert-BootstrapRuntime -PythonPath $runtimePython
 $previousDontWriteBytecode = $env:PYTHONDONTWRITEBYTECODE
 $env:PYTHONDONTWRITEBYTECODE = "1"
 Invoke-NativeChecked -FilePath $runtimePython -Arguments @('-c', "import importlib.util, pymss, pymss.graph, torch, librosa, av, yaml, tqdm; print('pymss', getattr(pymss, '__version__', 'unknown'), pymss.__file__); print('torch', torch.__version__, 'cuda', torch.version.cuda, 'cuda_available', torch.cuda.is_available()); print('librosa', librosa.__version__); print('av', av.__version__); print('mlx', importlib.util.find_spec('mlx') is not None)")

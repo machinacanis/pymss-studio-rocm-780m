@@ -132,6 +132,16 @@ class ManifestRequirementTests(unittest.TestCase):
             self.assertNotIn("pymss>=2.0.15", content)
             self.assertNotIn("pysocks requests pyyaml", content)
 
+    def test_release_builders_install_and_verify_bootstrap_proxy_dependencies(self):
+        root = worker_bootstrap.MANIFEST_PATH.parent.parent
+        manifest = json.loads(worker_bootstrap.MANIFEST_PATH.read_text(encoding="utf-8"))
+        self.assertIn("[socks]", manifest["bootstrap"]["requests"])
+        for name in ("prepare-python-runtime.ps1", "prepare-python-runtime.sh"):
+            content = (root / "scripts" / name).read_text(encoding="utf-8")
+            self.assertIn("BootstrapRequirements" if name.endswith(".ps1") else "BOOTSTRAP_REQUIREMENTS", content)
+            self.assertIn("import requests", content)
+            self.assertIn("socks", content)
+
     def test_manifest_validation_includes_the_backend_torch_requirement(self):
         manifest = {
             **MANIFEST,

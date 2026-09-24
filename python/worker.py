@@ -111,7 +111,7 @@ def run_command(command: str, payload: dict) -> int:
         from worker_download import cmd_download_model
         return cmd_download_model(payload)
     if command == "test_connection":
-        from worker_download import cmd_test_connection
+        from worker_connection import cmd_test_connection
         return cmd_test_connection(payload)
     if command == "audio_metadata":
         from worker_audio import cmd_audio_metadata

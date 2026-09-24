@@ -41,7 +41,10 @@ import sys
 manifest = json.loads(open(sys.argv[1], encoding="utf-8").read())
 backend = manifest.get("backends", {}).get(sys.argv[2], {})
 kind = sys.argv[3]
-if kind == "common":
+if kind == "bootstrap":
+    for requirement in manifest.get("bootstrap", {}).values():
+        print(requirement)
+elif kind == "common":
     for name, requirement in manifest.get("common", {}).items():
         if name not in {"pymss", "pymss-core"}:
             print(requirement)
@@ -59,8 +62,10 @@ elif kind == "torch-index-url":
 PY
 }
 
-verify_bootstrap_requirement_parser() {
+verify_bootstrap_runtime() {
   PYTHONHOME="$RUNTIME_HOME" "$PY" - <<'PY'
+import requests
+import socks
 from pip._vendor.packaging.requirements import Requirement
 from pip._vendor.packaging.version import Version
 
@@ -69,6 +74,10 @@ assert Version("2.1.5") > Version("2.1.4")
 PY
 }
 
+MANIFEST_BOOTSTRAP_REQUIREMENTS=()
+while IFS= read -r requirement; do
+  [[ -n "$requirement" ]] && MANIFEST_BOOTSTRAP_REQUIREMENTS+=("$requirement")
+done < <(manifest_values bootstrap)
 MANIFEST_COMMON_REQUIREMENTS=()
 while IFS= read -r requirement; do
   [[ -n "$requirement" ]] && MANIFEST_COMMON_REQUIREMENTS+=("$requirement")
@@ -120,13 +129,15 @@ fi
 if [[ "$OSTYPE" == darwin* && -z "$INITIAL_BACKEND" && "$VARIANT" != "mlx" && "$VARIANT" != "mps" ]]; then
   PYTHONHOME="$RUNTIME_HOME" "$PY" -m ensurepip --upgrade
   PYTHONHOME="$RUNTIME_HOME" "$PY" -m pip install --upgrade pip setuptools wheel
+  PYTHONHOME="$RUNTIME_HOME" "$PY" -m pip install --no-cache-dir "${MANIFEST_BOOTSTRAP_REQUIREMENTS[@]}"
   bash "$(dirname "$0")/prune-python-runtime.sh" "$RUNTIME_DIR" --keep-venv
   PYTHONHOME="$RUNTIME_HOME" "$PY" -m pip --version
-  verify_bootstrap_requirement_parser
+  verify_bootstrap_runtime
   exit 0
 fi
 
 PYTHONHOME="$RUNTIME_HOME" "$PY" -m pip install --upgrade pip setuptools wheel
+PYTHONHOME="$RUNTIME_HOME" "$PY" -m pip install --no-cache-dir "${MANIFEST_BOOTSTRAP_REQUIREMENTS[@]}"
 
 if [[ -z "$TORCH_INDEX_URL" ]]; then
   PYTHONHOME="$RUNTIME_HOME" "$PY" -m pip install --no-cache-dir "$TORCH_REQUIREMENT"
@@ -141,7 +152,7 @@ PYTHONHOME="$RUNTIME_HOME" "$PY" -m pip install --no-cache-dir --upgrade "$MANIF
 
 bash "$(dirname "$0")/prune-python-runtime.sh" "$RUNTIME_DIR" --keep-venv
 PYTHONHOME="$RUNTIME_HOME" "$PY" -m pip --version
-verify_bootstrap_requirement_parser
+verify_bootstrap_runtime
 
 if [[ "$OSTYPE" == darwin* && "$VARIANT" == "mlx" ]]; then
   mkdir -p "$RUNTIME_ENVS_DIR"

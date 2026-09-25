@@ -49,17 +49,15 @@
       ],
       "python": "3.12",
       "torch": {
-        "requirement": "torch==2.9.1",
+        "requirement": "torch==2.13.0+rocm10.0.0",
         "rocmRequirements": [
-          "https://repo.radeon.com/rocm/windows/rocm-rel-7.2.1/rocm_sdk_core-7.2.1-py3-none-win_amd64.whl",
-          "https://repo.radeon.com/rocm/windows/rocm-rel-7.2.1/rocm_sdk_devel-7.2.1-py3-none-win_amd64.whl",
-          "https://repo.radeon.com/rocm/windows/rocm-rel-7.2.1/rocm_sdk_libraries_custom-7.2.1-py3-none-win_amd64.whl",
-          "https://repo.radeon.com/rocm/windows/rocm-rel-7.2.1/rocm-7.2.1.tar.gz"
+          "https://stable.repo.amd.com/rocm/core/whl-next/rocm-sdk-core/rocm_sdk_core-10.0.0-py3-none-win_amd64.whl",
+          "https://stable.repo.amd.com/rocm/core/whl-next/rocm-sdk-libraries/rocm_sdk_libraries-10.0.0-py3-none-win_amd64.whl",
+          "https://stable.repo.amd.com/rocm/core/whl-next/rocm-sdk-device-gfx1103/rocm_sdk_device_gfx1103-10.0.0-py3-none-win_amd64.whl"
         ],
         "requirements": [
-          "https://repo.radeon.com/rocm/windows/rocm-rel-7.2.1/torch-2.9.1%2Brocm7.2.1-cp312-cp312-win_amd64.whl",
-          "https://repo.radeon.com/rocm/windows/rocm-rel-7.2.1/torchaudio-2.9.1%2Brocm7.2.1-cp312-cp312-win_amd64.whl",
-          "https://repo.radeon.com/rocm/windows/rocm-rel-7.2.1/torchvision-0.24.1%2Brocm7.2.1-cp312-cp312-win_amd64.whl"
+          "https://stable.repo.amd.com/rocm/pytorch/whl-next/torch/torch-2.13.0%2Brocm10.0.0-cp312-cp312-win_amd64.whl",
+          "https://stable.repo.amd.com/rocm/pytorch/whl-next/amd-torch-device-gfx1103/amd_torch_device_gfx1103-2.13.0%2Brocm10.0.0-cp312-cp312-win_amd64.whl"
         ],
         "noDeps": true
       }

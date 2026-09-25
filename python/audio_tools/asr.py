@@ -542,6 +542,10 @@ def _transcribe_audio(payload: dict[str, Any]) -> dict[str, Any]:
         "operation": "asr", "phase": "loading_asr_model", "completed": 0,
         "total": 0, "current": Path(model_path).name,
     })
+    from worker_vram import apply_cuda_memory_budget, configure_allocator_env
+
+    configure_allocator_env()
+    apply_cuda_memory_budget(0)
     try:
         with isolate_protocol_stdout():
             from funasr import AutoModel  # type: ignore

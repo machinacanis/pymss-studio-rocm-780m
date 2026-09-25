@@ -46,26 +46,13 @@ Pymss Studio 将 [`pymss`](https://github.com/pymss-project/pymss) 音乐源分�
 > [!WARNING]
 > Pymss Studio 仍处于功能开发的早期阶段，正在积极迭代中。请谨慎使用。在此阶段，各版本之间可能存在**破坏性变更**（breaking changes）。
 
-请从 [Pymss Studio Releases](https://github.com/pymss-project/pymss-studio/releases) 下载最新的 Windows、Linux 或 macOS 安装包。
+下载这个 fork 构建的 Windows ROCm 包。
 
-请根据设备选择对应版本：
-
-| 使用场景 | 推荐版本 |
+| 使用场景 | 包 |
 | --- | --- |
-| NVIDIA 显卡 | Windows CUDA |
-| 没有独立显卡、只有核显，或希望直接使用 CPU 推理 | Windows CPU |
-| 网络稳定且希望下载体积尽可能小 | Windows Online |
-| Windows AMD 显卡 | Windows ROCm |
-| Apple Silicon Mac，即 M1/M2/M3/M4 等 | macOS MLX |
-| Intel Mac | 当前没有对应发布版本 |
+| Windows 11 上的 Radeon 780M（`gfx1103`） | Windows ROCm |
 
-macOS 版本安装完成后，需要执行：
-
-```bash
-xattr -cr '/Applications/Pymss Studio.app'
-```
-
-然后从 `/Applications` 打开 Pymss Studio。
+这里不构建 CUDA、CPU、Online 和 macOS 包。
 
 ## 交流与反馈
 
@@ -207,11 +194,10 @@ flowchart LR
 
 ## 发布打包
 
-Windows 发布分为 CUDA 与 CPU 两个变体。发布流程会先准备嵌入式 Python 运行时，再构建 Tauri 可执行文件，随后将 worker、核心项目和工具链暂存到便携目录，最后生成压缩包或安装器。
+这个 fork 只发布一个 Windows 包：带 `gfx1103` 内核的 ROCm 10，面向 Radeon 780M。不再产出 CUDA、CPU、Online 和 macOS 包。
 
 ```powershell
-./scripts/prepare-python-runtime.ps1 -Variant cuda
-./scripts/prepare-python-runtime.ps1 -Variant default
+./scripts/prepare-python-runtime.ps1 -Variant rocm -InitialBackend rocm
 ```
 
 暂存后的构建会通过 `env_info` 和 `list_models` 等 worker 命令做冒烟检查。

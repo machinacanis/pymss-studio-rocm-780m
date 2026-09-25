@@ -474,6 +474,11 @@ def _prepare_separator(
     progress_callback: Any,
     logger: Any,
 ) -> Any:
+    from worker_vram import configure_allocator_env, install_separator_vram_guard, vram_task_id
+
+    configure_allocator_env()
+    vram_task_id.set(task_id)
+    install_separator_vram_guard()
     model_name = payload.get("model")
     if not model_name:
         raise ValueError("Missing model name")
@@ -714,6 +719,29 @@ def normalize_audio_params(payload_audio_params: Any) -> dict[str, Any]:
     return normalized
 
 
+def _shrink_after_cuda_oom(exc: BaseException, task_id: str) -> int | None:
+    """Return the next chunk cap after a GPU OOM, or None if this is not an OOM."""
+    from worker_vram import current_chunk_cap, is_cuda_oom, note_oom_retry, release_cuda_cache
+
+    if not is_cuda_oom(exc):
+        return None
+    smaller = note_oom_retry()
+    if smaller is None:
+        raise RuntimeError(
+            "780M GPU memory is still exhausted after reducing chunk_size to "
+            f"{current_chunk_cap()}. Close other apps using the GPU and retry. {exc}"
+        ) from exc
+    emit("task_log", {
+        "level": "warning",
+        "message": (
+            f"GPU ran out of memory. Retrying with chunk_size {smaller} and TTA off. "
+            "780M shared memory cannot hold the previous chunk."
+        ),
+    }, task_id=task_id)
+    release_cuda_cache()
+    return smaller
+
+
 def cmd_infer_batch(payload: dict[str, Any]) -> int:
     raw_tasks = payload.get("tasks")
     if not isinstance(raw_tasks, list) or not raw_tasks:
@@ -803,7 +831,22 @@ def cmd_infer_batch(payload: dict[str, Any]) -> int:
             task_id = item["taskId"]
             active_task_id = task_id
             emit("task_stage", {"stage": "separating", "message": "Separating"}, task_id=task_id)
-            success_files = separator.process_folder(item["input"], int(item.get("inputIndex") or 1))
+            while True:
+                try:
+                    success_files = separator.process_folder(item["input"], int(item.get("inputIndex") or 1))
+                    break
+                except Exception as exc:
+                    _close_separator(separator)
+                    separator = None
+                    smaller = _shrink_after_cuda_oom(exc, task_id)
+                    if smaller is None:
+                        raise
+                    separator = _prepare_separator(
+                        payload={**payload, "output": output_root, "saveAsFolder": save_as_folder},
+                        task_id=root_task_id,
+                        progress_callback=emit_batch_progress,
+                        logger=logger,
+                    )
             if Path(item["input"]).name not in {Path(name).name for name in success_files}:
                 emit_error("INFERENCE_FAILED", f"Batch separation did not produce outputs for {Path(item['input']).name}", task_id=task_id)
                 continue
@@ -903,18 +946,27 @@ def cmd_infer(payload: dict[str, Any]) -> int:
         except Exception:
             logger = None
 
-        separator = _prepare_separator(
-            payload={
-                **payload,
-                "output": output_dir,
-                "saveAsFolder": save_as_folder,
-            },
-            task_id=task_id,
-            progress_callback=emit_separation_progress,
-            logger=logger,
-        )
-        emit("task_stage", {"stage": "separating", "message": "Separating"}, task_id=task_id)
-        success_files = separator.process_folder(input_path, int(payload.get("inputIndex") or 1))
+        while True:
+            separator = _prepare_separator(
+                payload={
+                    **payload,
+                    "output": output_dir,
+                    "saveAsFolder": save_as_folder,
+                },
+                task_id=task_id,
+                progress_callback=emit_separation_progress,
+                logger=logger,
+            )
+            emit("task_stage", {"stage": "separating", "message": "Separating"}, task_id=task_id)
+            try:
+                success_files = separator.process_folder(input_path, int(payload.get("inputIndex") or 1))
+                break
+            except Exception as exc:
+                _close_separator(separator)
+                separator = None
+                smaller = _shrink_after_cuda_oom(exc, task_id)
+                if smaller is None:
+                    raise
         if Path(input_path).name not in {Path(name).name for name in success_files}:
             return emit_error("INFERENCE_FAILED", f"Separation did not produce outputs for {Path(input_path).name}", task_id=task_id)
         emit("task_stage", {"stage": "writing_output", "message": "Collecting outputs"}, task_id=task_id)

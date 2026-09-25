@@ -714,6 +714,11 @@ def _finalize_ensemble_output(saved: Any, *, payload: dict[str, Any], input_path
 def _run_pymss(payload: dict[str, Any], task_id: str, input_path: str | None,
                inputs: dict[str, str] | None, output_dir: str, output_layout: str) -> dict[str, Any]:
     try:
+        from worker_vram import configure_allocator_env, install_separator_vram_guard, vram_task_id
+
+        configure_allocator_env()
+        vram_task_id.set(task_id)
+        install_separator_vram_guard()
         import pymss.graph as graph
     except (ImportError, ModuleNotFoundError) as exc:
         raise RuntimeError(

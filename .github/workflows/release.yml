@@ -10,11 +10,9 @@ on:
       target:
         description: "Build target"
         required: true
-        default: "all"
+        default: "windows"
         type: choice
         options:
-          - all
-          - macos
           - windows
       publish:
         description: "Publish a GitHub Release"
@@ -46,12 +44,7 @@ jobs:
       version: ${{ github.event.inputs.version || github.ref_name }}
     secrets: inherit
 
-  macos:
-    if: github.event_name != 'workflow_dispatch' || github.event.inputs.target == 'all' || github.event.inputs.target == 'macos'
-    uses: ./.github/workflows/release-macos.yml
-    with:
-      version: ${{ github.event.inputs.version || github.ref_name }}
-    secrets: inherit
+
 
   github-release:
     name: Publish GitHub Release
@@ -63,7 +56,7 @@ jobs:
       ) &&
       !contains(needs.*.result, 'failure') &&
       !contains(needs.*.result, 'cancelled')
-    needs: [windows, macos]
+    needs: [windows]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -150,13 +143,7 @@ jobs:
           path: artifacts
           merge-multiple: true
           pattern: Pymss-Studio-${{ steps.release_meta.outputs.version }}-windows-x64-update
-      - name: Download macOS release artifacts
-        if: needs.macos.result == 'success'
-        uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-          merge-multiple: true
-          pattern: Pymss-Studio-${{ steps.release_meta.outputs.version }}-macos-*-mlx
+
       - name: Split oversized release assets
         shell: bash
         run: |

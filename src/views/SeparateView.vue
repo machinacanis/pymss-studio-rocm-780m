@@ -2550,7 +2550,7 @@ async function retryCurrentTask() {
                   <n-grid-item v-if="hasInferenceField('chunk_size')">
                     <div class="field-block">
                       <label>{{ t('inference.chunkSize') }}</label>
-                      <n-input-number v-model:value="chunk_size" :min="0" :max="1048576" :step="1024" style="width:100%" @blur="task.restoreInferenceNumberFallback('chunk_size')" />
+                      <n-input-number v-model:value="chunk_size" :min="0" :max="352800" :step="1024" style="width:100%" @blur="task.restoreInferenceNumberFallback('chunk_size')" />
                     </div>
                   </n-grid-item>
                   <n-grid-item v-if="hasInferenceField('window_size')">

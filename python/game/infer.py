@@ -58,6 +58,11 @@ def _available_midi_path(output_dir: Path, audio_name: str) -> Path:
 
 def _select_device(torch_module: Any = torch) -> torch.device:
     if torch_module.cuda.is_available():
+        from worker_vram import apply_cuda_memory_budget, configure_allocator_env
+
+        configure_allocator_env()
+        index = torch_module.cuda.current_device() if hasattr(torch_module.cuda, "current_device") else 0
+        apply_cuda_memory_budget(int(index))
         return torch.device("cuda")
     mps = getattr(torch_module.backends, "mps", None)
     if mps is not None and mps.is_available():

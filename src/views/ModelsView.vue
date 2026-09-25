@@ -1360,7 +1360,7 @@ onMounted(() => {
             </label>
             <label class="inference-editor-field">
               <span>{{ t('inference.chunkSize') }}</span>
-              <n-input-number v-model:value="inferenceDraft.chunk_size" :min="0" :max="1048576" :step="1024" />
+              <n-input-number v-model:value="inferenceDraft.chunk_size" :min="0" :max="352800" :step="1024" />
             </label>
           </div>
         </div>

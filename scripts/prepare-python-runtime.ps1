@@ -1,6 +1,6 @@
 param(
     [ValidateSet("cuda", "default", "rocm", "mps", "mlx")]
-    [string]$Variant = "cuda",
+    [string]$Variant = "rocm",
     [string]$Python = "python",
     [string]$RuntimeDir = "python-runtime",
     [string]$TorchVersion = "2.7.1",
@@ -200,6 +200,10 @@ if ($RewriteRuntimeEnvConfigs -or $TemplateRuntimeEnvConfigs) {
     Rewrite-WindowsRuntimeEnvConfigs -EnvsDir $RuntimeEnvsDir -PythonRuntimeDir $RuntimeDir -Template:$TemplateRuntimeEnvConfigs
     exit 0
 }
+if ($Variant -ne "rocm" -or ($InitialBackend -and $InitialBackend -ne "rocm")) {
+    throw "This fork only builds the ROCm runtime. Use -Variant rocm -InitialBackend rocm."
+}
+
 
 # ---------------------------------------------------------------------------
 # InitialBackend mode: create minimal bootstrap + initial backend env

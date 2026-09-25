@@ -138,6 +138,9 @@ def run_command(command: str, payload: dict) -> int:
 
 
 def main(argv: list[str]) -> int:
+    from worker_vram import configure_allocator_env
+
+    configure_allocator_env()
     args = parse_args(argv)
     debug_log("worker.start", command=args.command)
     try:

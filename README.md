@@ -46,26 +46,13 @@ Pymss Studio turns the [`pymss`](https://github.com/pymss-project/pymss) source-
 > [!WARNING]
 > Pymss Studio is still at an early stage of feature development and under active iteration. Please use with caution. **Breaking changes may occur between versions** during this phase.
 
-Download the latest Windows, Linux, or macOS package from the [Pymss Studio releases page](https://github.com/pymss-project/pymss-studio/releases).
+Download the Windows ROCm package built by this fork.
 
-Choose the package variant that matches your machine:
-
-| Use case | Recommended package |
+| Use case | Package |
 | --- | --- |
-| NVIDIA GPU | Windows CUDA |
-| No discrete GPU, integrated graphics only, or you prefer CPU inference | Windows CPU |
-| Stable network, and you want the smallest download | Windows Online |
-| Windows AMD GPU | Windows ROCm |
-| Apple Silicon Mac, including M1/M2/M3/M4 | macOS MLX |
-| Intel Mac | No dedicated release package currently |
+| Radeon 780M (`gfx1103`) on Windows 11 | Windows ROCm |
 
-On macOS, clear the quarantine attribute after installing the app:
-
-```bash
-xattr -cr '/Applications/Pymss Studio.app'
-```
-
-Then open Pymss Studio from `/Applications`.
+CUDA, CPU, Online, and macOS packages are not built here.
 
 ## Community and feedback
 
@@ -210,11 +197,10 @@ The UI owns interaction design and state. Tauri owns desktop integration, proces
 
 ## Release packaging
 
-Windows releases are built in CUDA and CPU variants. The release flow prepares an embedded Python runtime, builds the Tauri executable, stages the portable directory with worker/core assets and tools, then produces archives or installers.
+This fork publishes one Windows package: ROCm 10 with `gfx1103` kernels for Radeon 780M. CUDA, CPU, Online, and macOS builds are not produced.
 
 ```powershell
-./scripts/prepare-python-runtime.ps1 -Variant cuda
-./scripts/prepare-python-runtime.ps1 -Variant default
+./scripts/prepare-python-runtime.ps1 -Variant rocm -InitialBackend rocm
 ```
 
 Staged builds are smoke-tested with worker commands such as `env_info` and `list_models`.

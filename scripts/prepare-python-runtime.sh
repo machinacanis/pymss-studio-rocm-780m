@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+echo "This fork only builds the Windows ROCm runtime. Use scripts/prepare-python-runtime.ps1 -Variant rocm -InitialBackend rocm." >&2
+exit 1
 VARIANT="${1:-cuda}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 RUNTIME_DIR="${RUNTIME_DIR:-python-runtime}"

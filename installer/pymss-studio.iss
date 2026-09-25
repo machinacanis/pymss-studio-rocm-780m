@@ -1,4 +1,4 @@
-; Pymss Studio Windows CUDA installer.
+; Pymss Studio Windows ROCm installer.
 ; The source directory is prepared by GitHub Actions and passed through PYMSS_PORTABLE_DIR.
 
 #define MyAppName "Pymss Studio"
@@ -7,7 +7,7 @@
 #define MyAppExeName "Pymss Studio.exe"
 #define SourceDir GetEnv("PYMSS_PORTABLE_DIR")
 #define OutputDir GetEnv("PYMSS_INSTALLER_OUTPUT") == "" ? "..\release" : GetEnv("PYMSS_INSTALLER_OUTPUT")
-#define PackageSuffix GetEnv("PYMSS_PACKAGE_SUFFIX") == "" ? "windows-x64-cuda" : GetEnv("PYMSS_PACKAGE_SUFFIX")
+#define PackageSuffix GetEnv("PYMSS_PACKAGE_SUFFIX") == "" ? "windows-x64-rocm" : GetEnv("PYMSS_PACKAGE_SUFFIX")
 
 #if SourceDir == ""
   #error PYMSS_PORTABLE_DIR is required. It must point to the staged portable directory.

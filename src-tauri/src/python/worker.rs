@@ -531,6 +531,32 @@ fn make_payload_file(command: &str, task_id: Option<&str>, payload: Value) -> Ap
     Ok(path)
 }
 
+fn studio_alloc_conf() -> String {
+    let mut parts: Vec<String> = Vec::new();
+    for name in ["PYTORCH_CUDA_ALLOC_CONF", "PYTORCH_HIP_ALLOC_CONF"] {
+        if let Ok(existing) = std::env::var(name) {
+            for raw in existing.split(',') {
+                let part = raw.trim();
+                if part.is_empty() {
+                    continue;
+                }
+                let key = part.split([':', '=']).next().unwrap_or("");
+                if parts.iter().any(|item| item.split([':', '=']).next() == Some(key)) {
+                    continue;
+                }
+                parts.push(part.to_string());
+            }
+        }
+    }
+    for required in ["expandable_segments:True", "garbage_collection_threshold:0.6"] {
+        let key = required.split(':').next().unwrap_or("");
+        if !parts.iter().any(|item| item.split([':', '=']).next() == Some(key)) {
+            parts.push(required.to_string());
+        }
+    }
+    parts.join(",")
+}
+
 fn build_worker_command(
     app: &AppHandle,
     command: &str,
@@ -549,6 +575,7 @@ fn build_worker_command(
     let python = select_worker_python(command, &bootstrap_python, active_runtime_python)?;
     let python_for_log = python.clone();
     let worker_for_log = worker.clone();
+    let alloc_conf = studio_alloc_conf();
     let mut cmd = Command::new(&python);
     isolate_python_environment(&mut cmd);
     #[cfg(windows)]
@@ -558,6 +585,8 @@ fn build_worker_command(
         .env("PYTHONIOENCODING", "utf-8")
         .env("PYTHONDONTWRITEBYTECODE", "1")
         .env("PYTHONUTF8", "1")
+        .env("PYTORCH_CUDA_ALLOC_CONF", &alloc_conf)
+        .env("PYTORCH_HIP_ALLOC_CONF", &alloc_conf)
         .env("PYMSS_STUDIO_BOOTSTRAP_PYTHON", &bootstrap_python)
         .env(
             "PYMSS_STUDIO_DEFAULT_OUTPUT_DIR",
